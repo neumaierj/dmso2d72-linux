@@ -78,6 +78,25 @@ class Dmso2d72:
     def _send_setting(self, cmd: int, val: bytes) -> None:
         self._send(p.scope_setting(cmd, val))
 
+    def raw_query(self, func: int, cmd: int, val: bytes = b"\x00\x00\x00\x00",
+                  read_len: int = 64, read_timeout_ms: int = 300) -> bytes:
+        """Send an arbitrary command and try to read a response on EP 0x81.
+
+        Used by the DMM reverse-engineering probe (tools/dmm_probe.py). Returns
+        the raw response bytes (possibly empty if the device sends nothing).
+        A read timeout is treated as "no response", not an error.
+        """
+        packet = p.build_command(func, cmd, val)
+        with self.lock:
+            self._write(packet)
+            try:
+                data = self._dev.read(p.READ_ENDPOINT, read_len, read_timeout_ms)
+            except usb.core.USBError as e:
+                if e.errno in (110, None):  # ETIMEDOUT / libusb timeout
+                    return b""
+                raise DeviceError(f"USB read failed: {e}") from e
+        return bytes(data)
+
     # -------------------------------------------------------------------- scope
 
     def scope_start(self, running: bool) -> None:

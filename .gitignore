@@ -6,3 +6,7 @@ build/
 dist/
 .pytest_cache/
 .claude/
+
+# firmware RE working dir (copyrighted binary must not be committed)
+re/*.bin
+re/*.dfu

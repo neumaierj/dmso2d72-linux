@@ -1,0 +1,107 @@
+# Reverse-engineering the DMSO2D72 multimeter (DMM) protocol
+
+Working notes. Goal: find the USB command that makes the device return a
+multimeter reading, and decode the returned bytes — **without** the Windows app,
+by analysing the firmware and by correlating the returned data stream with known
+physical inputs.
+
+## What is already known (scope/AWG)
+
+Host → device commands are 10-byte packets on bulk OUT endpoint `0x02`:
+
+| offset | field | notes |
+|-------:|-------|-------|
+| 0 | idx   | 0x00 |
+| 1 | magic | 0x0A |
+| 2–3 | func (u16 LE) | 0x0000 scope-setting, 0x0002 AWG, 0x0003 screen, 0x0100 scope-capture |
+| 4 | cmd   | per-function command |
+| 5–8 | value | u8/u16/u32 little-endian |
+| 9 | last  | 0x00 |
+
+Waveform data is read back on bulk IN endpoint `0x81`. Switching the device to
+its multimeter screen is `func=0x0003, cmd=0x00, value=0x01` (already used by the
+app).
+
+## Firmware findings (from `27D72_dump.bin`, STM32F103VET6, 512 KB)
+
+Static analysis with capstone (`analyze.py`, `dispatch.py`, `funcscan.py`,
+`context.py` in this directory). Confirmed by reading the disassembly:
+
+1. **The framing above is correct.** The command parser (around `0x08000a00`
+   and `0x08001300`) validates `magic == 0x0A` (byte offset 1 — this constant is
+   compared in exactly 3 places in the image) and then reads **func at offset 2
+   (halfword)**, **cmd at offset 4 (byte)**, and **value at offset 6**, exactly
+   matching `src/dmso2d72/protocol.py`. Example, at `0x080009e2`:
+
+   ```
+   ... == 0x0A          ; magic
+   ldrh r0,[r0,#2]; cmp #0   ; func  == 0x0000
+   ldrb r0,[r0,#4]; cmp #0   ; cmd   == 0x00
+   ldrh r0,[r0,#6]; cmp #1   ; value == 1
+   blx  <handler>
+   ```
+
+2. There is a **long if/else dispatch chain** keyed on (func, cmd, value); each
+   arm calls a handler. This is where a DMM command would live.
+
+3. **Scripted disassembly could not reliably pin the exact DMM read command.**
+   The firmware is stripped, the parser copies the packet pointer through several
+   registers, and large stretches above ~`0x08003000` are data/lookup tables that
+   a linear disassembler mis-decodes. Reliably extracting the specific func/cmd
+   that triggers a CS7721 read + EP `0x81` response needs either:
+   - an **interactive Ghidra** session (load as ARM Cortex-M3 @ `0x08000000`,
+     let it recover functions and follow xrefs from the parser to the USB-IN
+     write and the CS7721 GPIO/serial read), or
+   - **hardware probing** with the harness below (faster to a first result).
+
+   The decode step needs hardware regardless, so probing is the practical path.
+
+## Open feasibility question
+
+It is not yet confirmed that the device streams live DMM *values* over USB at
+all — the Windows software may only *control* the DMM (mode/range) while the
+reading stays on the device's own LCD. The probe harness settles this directly:
+if some command returns changing bytes on EP `0x81` while the input changes, a
+readout path exists.
+
+## Candidate commands to try (probe harness)
+
+Evidence-based guesses, tried conservatively (zero payload, DMM screen active):
+
+- `func=0x0001` — the one small func value **unused** by scope/AWG/screen; the
+  DMM is the "third instrument".
+- `func=0x0101`, `func=0x0103` — "read"-class variants (scope-capture sets the
+  high byte: `0x0100`); a DMM read may mirror that.
+- `func=0x0003` with `cmd` != 0 — a query on the screen/function channel.
+- Small `cmd` sweep (0x00–0x1F) under each candidate func.
+
+## Experiment protocol (decode the data stream)
+
+Run `tools/dmm_probe.py` (see `--help`). For each step, pass `--label` describing
+what is physically on the DMM inputs; every frame is logged to `re/dmm_log.jsonl`.
+
+1. **Find the read command.** `--find` tries the candidate commands above and
+   reports which return a non-empty, *changing* response. Keep the winning
+   `func`/`cmd`.
+2. **DC volts.** Loop the AWG output (set a DC offset) into the DMM inputs, and/or
+   use batteries. Record frames at several known voltages: 0 V, ~1.5 V (AA),
+   ~9 V (block), plus a few AWG steps. Set the device to DC-V mode.
+   → fit `raw_count → volts` (expect linear, 4000-count full scale); find the
+   **sign** byte and the **range/decimal-point** byte by switching ranges.
+3. **AC volts.** AWG sine at known amplitudes → AC-mode byte and scaling.
+4. **Resistance / continuity.** Known resistors and short/open leads → resistance
+   mode byte, overload ("OL") flag, continuity threshold.
+5. **Mode/range fields.** Hold the input constant and switch modes on the device
+   (and vice-versa) to isolate which bytes encode measurement type vs. range.
+
+Fill in the decode table below as results arrive.
+
+## Decode table (to be completed from hardware)
+
+| byte(s) | meaning | encoding | evidence |
+|---------|---------|----------|----------|
+| ?       | raw count | u16/u24 LE? | TBD |
+| ?       | sign | 0/1 | TBD |
+| ?       | mode | enum | TBD |
+| ?       | range / decimal point | enum | TBD |
+| ?       | overload flag | bool | TBD |
