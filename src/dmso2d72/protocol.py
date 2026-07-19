@@ -34,6 +34,9 @@ FUNC_SCOPE_SETTING = 0x0000
 FUNC_SCOPE_CAPTURE = 0x0100
 FUNC_AWG_SETTING = 0x0002
 FUNC_SCREEN_SETTING = 0x0003
+# Reverse-engineered by hardware probing (see re/DMM_PROTOCOL.md): querying
+# this function returns the live multimeter status/value frame on EP 0x81.
+FUNC_DMM_STATUS = 0x0101
 
 # Scope setting commands
 SCOPE_ENABLE_CH1 = 0x00
@@ -233,3 +236,70 @@ def decode_capture(buffer: bytes, channels: list[int]) -> dict[int, list[int]]:
 def raw_to_divisions(raw: int) -> float:
     """Convert a raw sample byte to screen position in divisions (-4 .. +4)."""
     return (raw - SAMPLE_BASELINE) / SAMPLE_SPAN * SCREEN_DIVS_V - SCREEN_DIVS_V / 2
+
+
+# --------------------------------------------------------------------- DMM ---
+#
+# The multimeter value frame (reply to FUNC_DMM_STATUS) is 14 bytes, verified
+# against the device screen across several known DC voltages (re/dmm_log.jsonl):
+#
+#   offset:  0    1    2    3    4     5     6      7   8   9  10    11   12   13
+#   bytes:  0x55 0x0b 0x01 0x0a mode  sign  dec    d1  d2  d3  d4   mode mode 0x55
+#
+#   - byte 5  = sign (0 positive, 1 negative)
+#   - byte 6  = number of decimal places (auto-range: 3 -> X.XXX, 2 -> XX.XX ...)
+#   - bytes 7..10 = the four displayed digits, most significant first, each a
+#                   plain binary 0..9
+#   - value = (-1)**sign * (d1*1000 + d2*100 + d3*10 + d4) / 10**dec
+#
+# Bytes 4, 11, 12 select the measurement mode/unit. Only DC volts has been
+# captured so far, where they are (0x01, 0x05, 0x01); other modes need captures
+# to label their unit (the numeric decode above already works for any mode).
+
+DMM_FRAME_LEN = 14
+DMM_FRAME_START = 0x55
+
+# (byte4, byte11, byte12) -> (mode name, unit). Extend as modes are captured.
+DMM_MODES = {
+    (0x01, 0x05, 0x01): ("DC Voltage", "V"),
+}
+
+
+class DmmReading:
+    """A decoded multimeter reading."""
+
+    def __init__(self, value: float, decimals: int, negative: bool,
+                 mode: str, unit: str, raw: bytes):
+        self.value = value
+        self.decimals = decimals
+        self.negative = negative
+        self.mode = mode
+        self.unit = unit
+        self.raw = raw
+
+    def formatted(self) -> str:
+        """Value formatted like the device screen, e.g. '3.298 V'."""
+        num = f"{self.value:.{self.decimals}f}"
+        return f"{num} {self.unit}".strip()
+
+    def __repr__(self) -> str:
+        return f"DmmReading({self.formatted()!r}, mode={self.mode!r})"
+
+
+def decode_dmm(frame: bytes) -> DmmReading:
+    """Decode a FUNC_DMM_STATUS reply into a reading. Raises ValueError if the
+    frame is not a well-formed 14-byte DMM status frame."""
+    if len(frame) != DMM_FRAME_LEN:
+        raise ValueError(f"expected {DMM_FRAME_LEN}-byte DMM frame, got {len(frame)}")
+    if frame[0] != DMM_FRAME_START or frame[-1] != DMM_FRAME_START:
+        raise ValueError("bad DMM frame framing (missing 0x55 start/end)")
+
+    negative = frame[5] == 1
+    decimals = frame[6]
+    digits = frame[7] * 1000 + frame[8] * 100 + frame[9] * 10 + frame[10]
+    value = digits / (10**decimals)
+    if negative:
+        value = -value
+
+    mode, unit = DMM_MODES.get((frame[4], frame[11], frame[12]), ("unknown", ""))
+    return DmmReading(value, decimals, negative, mode, unit, bytes(frame))

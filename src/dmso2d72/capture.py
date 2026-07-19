@@ -48,3 +48,33 @@ class CaptureWorker(QThread):
                 return
             self.data_ready.emit(data)
             self.msleep(50)
+
+
+class DmmWorker(QThread):
+    """Continuously polls the multimeter while running.
+
+    Emits reading with a protocol.DmmReading (or None if the device is not on
+    the multimeter screen), or failed with a message on USB error.
+    """
+
+    reading = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, device: Dmso2d72, parent=None):
+        super().__init__(parent)
+        self._device = device
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        while not self._stop:
+            try:
+                value = self._device.read_dmm()
+            except DeviceError as e:
+                if not self._stop:
+                    self.failed.emit(str(e))
+                return
+            self.reading.emit(value)
+            self.msleep(200)

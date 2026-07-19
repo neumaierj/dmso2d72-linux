@@ -126,12 +126,36 @@ sweep included `func=0x0003` (screen select), which switched the device to
 scope/AWG. The decode session and normal reads never use `func=0x0003` except one
 explicit switch-to-DMM.
 
-## Decode table (to be completed from hardware)
+## SOLVED — value frame decoded (DC volts)
 
-| byte(s) | meaning | encoding | evidence |
-|---------|---------|----------|----------|
-| ?       | raw count | u16/u24 LE? | TBD |
-| ?       | sign | 0/1 | TBD |
-| ?       | mode | enum | TBD |
-| ?       | range / decimal point | enum | TBD |
-| ?       | overload flag | bool | TBD |
+The live value is the **`func=0x0101`** reply (not `0x0103`, which is a static
+config frame). It is 14 bytes, verified against the device screen across
+0 V / 1.499 V / 3.298 V / 3.99 V / 4.98 V:
+
+```
+offset:  0    1    2    3    4     5     6      7   8   9  10    11   12   13
+bytes:  0x55 0x0b 0x01 0x0a mode  sign  dec    d1  d2  d3  d4   mode mode 0x55
+```
+
+| byte(s) | meaning | encoding |
+|---------|---------|----------|
+| 0, 13   | framing | constant 0x55 |
+| 1       | length? | constant 0x0b |
+| 2, 3    | func / magic echo | 0x01, 0x0a |
+| 5       | sign | 0 = positive, 1 = negative |
+| 6       | decimal places | 3 → `X.XXX`, 2 → `XX.XX`, … (auto-range) |
+| 7..10   | 4 display digits | plain binary 0..9, most significant first |
+| 4,11,12 | mode / unit | DC volts = (0x01, 0x05, 0x01); other modes TBD |
+
+**value = (-1)^sign × (d1·1000 + d2·100 + d3·10 + d4) / 10^dec**
+
+Implemented as `protocol.decode_dmm()` with real frames as unit-test fixtures,
+`device.read_dmm()`, `capture.DmmWorker`, and a live `gui/dmm_tab.py`.
+
+### Still TODO (needs more captures, easy via dmm_decode_session.py)
+- Mode/unit bytes for **AC volts, DC/AC current, resistance, continuity,
+  capacitance, diode** — capture one reading in each mode and add the
+  `(byte4, byte11, byte12)` tuple to `protocol.DMM_MODES`. The numeric value
+  already decodes correctly for every mode; only the unit label is missing.
+- **Overload ("OL")** representation — capture an over-range reading.
+- Confirm the **sign** byte with a genuinely negative input (reversed leads).

@@ -12,10 +12,13 @@ Linux GUI.
   mode, level), run/stop, single or continuous capture, CSV export.
 - **Signal generator**: waveform type (sine, square, ramp, trapezoid, arb
   slots), frequency, amplitude, offset, duty cycles, output start/stop.
-- **Multimeter**: *experimental* — the DMM readout protocol has not been
-  publicly reverse-engineered yet. The app can switch the device to its
-  multimeter screen; see [tools/usb_capture.md](tools/usb_capture.md) if you
-  want to help capture the missing protocol.
+- **Multimeter**: live readings over USB. The DMM protocol was reverse-
+  engineered for this project by probing the device and correlating the data
+  stream with known inputs (see [re/DMM_PROTOCOL.md](re/DMM_PROTOCOL.md)).
+  **DC volts is fully decoded** (value, sign, auto-range); other modes (AC
+  volts, resistance, current, ...) show the correct number but the unit label
+  still needs a capture in each mode — easy to add with
+  `tools/dmm_decode_session.py`.
 
 ## Installation
 
@@ -57,6 +60,7 @@ too (scope/AWG features permitting), but only the DMSO2D72 has been targeted.
 - [ ] Trigger level/slope changes affect the trace
 - [ ] AWG: 1 kHz sine on the generator output, visible on CH1
 - [ ] CSV export contains plausible sample values
+- [ ] Multimeter: DC-volts reading matches the device screen (Start reading)
 
 ## Vertical units
 

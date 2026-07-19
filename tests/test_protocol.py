@@ -89,3 +89,44 @@ def test_scale_tables_complete():
     assert len(p.TIME_SCALES) == 34
     codes = [code for code, _ in p.TIME_SCALES.values()]
     assert codes == list(range(0x22))
+
+
+# Real FUNC_DMM_STATUS frames captured from the device (re/dmm_log.jsonl),
+# each paired with the value shown on the device's own screen.
+DMM_FRAMES = [
+    ("550b010a01010300000000050155", 0.000, 3),   # open leads, ~0
+    ("550b010a01000301040909050155", 1.499, 3),   # 1.5 V battery
+    ("550b010a01000200040908050155", 4.98, 2),    # 5 V supply, auto-ranged
+    ("550b010a01000303020908050155", 3.298, 3),   # 3.3 V supply
+    ("550b010a01000200030909050155", 3.99, 2),    # ~4 V supply, auto-ranged
+]
+
+
+@pytest.mark.parametrize("hexframe,expected,decimals", DMM_FRAMES)
+def test_decode_dmm_matches_screen(hexframe, expected, decimals):
+    r = p.decode_dmm(bytes.fromhex(hexframe))
+    assert r.value == pytest.approx(expected)
+    assert r.decimals == decimals
+    assert r.mode == "DC Voltage"
+    assert r.unit == "V"
+
+
+def test_decode_dmm_formatted():
+    r = p.decode_dmm(bytes.fromhex("550b010a01000303020908050155"))
+    assert r.formatted() == "3.298 V"
+
+
+def test_decode_dmm_sign():
+    # byte 5 = 1 marks a negative reading
+    frame = bytearray.fromhex("550b010a01000301040909050155")
+    frame[5] = 1
+    r = p.decode_dmm(bytes(frame))
+    assert r.negative is True
+    assert r.value == pytest.approx(-1.499)
+
+
+def test_decode_dmm_rejects_bad_framing():
+    with pytest.raises(ValueError):
+        p.decode_dmm(bytes.fromhex("00" * 14))
+    with pytest.raises(ValueError):
+        p.decode_dmm(bytes.fromhex("550b0301"))  # too short

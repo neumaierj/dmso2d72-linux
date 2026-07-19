@@ -193,6 +193,19 @@ class Dmso2d72:
             p.build_command(p.FUNC_AWG_SETTING, p.AWG_START_STOP, p.val_u8(1 if running else 0))
         )
 
+    # -------------------------------------------------------------------- dmm
+
+    def read_dmm(self) -> "p.DmmReading | None":
+        """Read one multimeter value. Returns None if the device sent no frame
+        (e.g. it is not currently on the multimeter screen)."""
+        frame = self.raw_query(p.FUNC_DMM_STATUS, 0x00)
+        if len(frame) != p.DMM_FRAME_LEN:
+            return None
+        try:
+            return p.decode_dmm(frame)
+        except ValueError:
+            return None
+
     # ------------------------------------------------------------------- screen
 
     def set_screen(self, screen: int) -> None:

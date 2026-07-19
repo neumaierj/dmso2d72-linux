@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.scope_tab.shutdown()
+        self.dmm_tab.shutdown()
         if self.device is not None:
             self.device.close()
         super().closeEvent(event)
