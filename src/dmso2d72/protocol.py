@@ -241,45 +241,62 @@ def raw_to_divisions(raw: int) -> float:
 # --------------------------------------------------------------------- DMM ---
 #
 # The multimeter value frame (reply to FUNC_DMM_STATUS) is 14 bytes, verified
-# against the device screen across several known DC voltages (re/dmm_log.jsonl):
+# against the device screen for DC volts, resistance and continuity
+# (re/dmm_log.jsonl):
 #
-#   offset:  0    1    2    3    4     5     6      7   8   9  10    11   12   13
-#   bytes:  0x55 0x0b 0x01 0x0a mode  sign  dec    d1  d2  d3  d4   mode mode 0x55
+#   offset:  0    1    2    3     4    5     6      7   8   9  10    11    12   13
+#   bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 #
+#   - byte 3  = measurement mode: 0x0a DC volts, 0x08 resistance, 0x09 continuity
 #   - byte 5  = sign (0 positive, 1 negative)
 #   - byte 6  = number of decimal places (auto-range: 3 -> X.XXX, 2 -> XX.XX ...)
 #   - bytes 7..10 = the four displayed digits, most significant first, each a
-#                   plain binary 0..9
+#                   plain binary 0..9 -- OR an overload sentinel (0xff...) when
+#                   the reading is over range ("OL" on screen)
+#   - byte 11 = range/unit prefix (resistance: 0x05 ohm, 0x03 kohm, 0x04 Mohm)
 #   - value = (-1)**sign * (d1*1000 + d2*100 + d3*10 + d4) / 10**dec
 #
-# Bytes 4, 11, 12 select the measurement mode/unit. Only DC volts has been
-# captured so far, where they are (0x01, 0x05, 0x01); other modes need captures
-# to label their unit (the numeric decode above already works for any mode).
+# Still to capture: AC volts, DC/AC current, capacitance, diode (add their byte-3
+# code and unit below). The numeric decode already works for any mode.
 
 DMM_FRAME_LEN = 14
 DMM_FRAME_START = 0x55
 
-# (byte4, byte11, byte12) -> (mode name, unit). Extend as modes are captured.
+OHM = "Ω"
+
+DMM_MODE_DCV = 0x0A
+DMM_MODE_OHM = 0x08
+DMM_MODE_CONTINUITY = 0x09
+
+# byte 3 -> (mode name, fixed unit). A None unit means "derive from the range
+# byte" (used for resistance). Extend as more modes are captured.
 DMM_MODES = {
-    (0x01, 0x05, 0x01): ("DC Voltage", "V"),
+    DMM_MODE_DCV: ("DC Voltage", "V"),
+    DMM_MODE_OHM: ("Resistance", None),
+    DMM_MODE_CONTINUITY: ("Continuity", OHM),
 }
+
+# resistance range: byte 11 -> unit prefix
+DMM_OHM_UNITS = {0x05: OHM, 0x03: "k" + OHM, 0x04: "M" + OHM}
 
 
 class DmmReading:
-    """A decoded multimeter reading."""
+    """A decoded multimeter reading. value is None when the input is over range
+    (the device shows "OL"); overload is True in that case."""
 
-    def __init__(self, value: float, decimals: int, negative: bool,
-                 mode: str, unit: str, raw: bytes):
+    def __init__(self, value: float | None, decimals: int, negative: bool,
+                 mode: str, unit: str, overload: bool, raw: bytes):
         self.value = value
         self.decimals = decimals
         self.negative = negative
         self.mode = mode
         self.unit = unit
+        self.overload = overload
         self.raw = raw
 
     def formatted(self) -> str:
-        """Value formatted like the device screen, e.g. '3.298 V'."""
-        num = f"{self.value:.{self.decimals}f}"
+        """Value formatted like the device screen, e.g. '3.298 V' or 'OL MΩ'."""
+        num = "OL" if self.overload else f"{self.value:.{self.decimals}f}"
         return f"{num} {self.unit}".strip()
 
     def __repr__(self) -> str:
@@ -296,10 +313,19 @@ def decode_dmm(frame: bytes) -> DmmReading:
 
     negative = frame[5] == 1
     decimals = frame[6]
-    digits = frame[7] * 1000 + frame[8] * 100 + frame[9] * 10 + frame[10]
-    value = digits / (10**decimals)
-    if negative:
-        value = -value
+    digit_bytes = frame[7:11]
+    overload = any(b > 9 for b in digit_bytes)
+    if overload:
+        value = None
+    else:
+        digits = digit_bytes[0] * 1000 + digit_bytes[1] * 100 + digit_bytes[2] * 10 + digit_bytes[3]
+        value = digits / (10**decimals)
+        if negative:
+            value = -value
 
-    mode, unit = DMM_MODES.get((frame[4], frame[11], frame[12]), ("unknown", ""))
-    return DmmReading(value, decimals, negative, mode, unit, bytes(frame))
+    mode, fixed_unit = DMM_MODES.get(frame[3], ("unknown", ""))
+    if frame[3] == DMM_MODE_OHM:
+        unit = DMM_OHM_UNITS.get(frame[11], OHM)
+    else:
+        unit = fixed_unit if fixed_unit is not None else ""
+    return DmmReading(value, decimals, negative, mode, unit, overload, bytes(frame))

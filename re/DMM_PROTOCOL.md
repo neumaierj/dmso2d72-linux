@@ -126,36 +126,40 @@ sweep included `func=0x0003` (screen select), which switched the device to
 scope/AWG. The decode session and normal reads never use `func=0x0003` except one
 explicit switch-to-DMM.
 
-## SOLVED — value frame decoded (DC volts)
+## SOLVED — value frame decoded (DC volts, resistance, continuity)
 
 The live value is the **`func=0x0101`** reply (not `0x0103`, which is a static
-config frame). It is 14 bytes, verified against the device screen across
-0 V / 1.499 V / 3.298 V / 3.99 V / 4.98 V:
+config frame). It is 14 bytes, verified against the device screen for DC volts
+(0 V … 4.98 V incl. auto-range), resistance (Ω/kΩ/MΩ + OL) and continuity:
 
 ```
-offset:  0    1    2    3    4     5     6      7   8   9  10    11   12   13
-bytes:  0x55 0x0b 0x01 0x0a mode  sign  dec    d1  d2  d3  d4   mode mode 0x55
+offset:  0    1    2    3     4    5     6      7   8   9  10    11    12   13
+bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 ```
 
 | byte(s) | meaning | encoding |
 |---------|---------|----------|
 | 0, 13   | framing | constant 0x55 |
 | 1       | length? | constant 0x0b |
-| 2, 3    | func / magic echo | 0x01, 0x0a |
+| 2       | func echo | 0x01 |
+| **3**   | **measurement mode** | **0x0a DC volts, 0x08 resistance, 0x09 continuity** |
 | 5       | sign | 0 = positive, 1 = negative |
 | 6       | decimal places | 3 → `X.XXX`, 2 → `XX.XX`, … (auto-range) |
-| 7..10   | 4 display digits | plain binary 0..9, most significant first |
-| 4,11,12 | mode / unit | DC volts = (0x01, 0x05, 0x01); other modes TBD |
+| 7..10   | 4 display digits | plain binary 0..9 MSB-first, **or `ff 00 4c ff` = OL** |
+| 11      | range / unit prefix | resistance: 0x05 Ω, 0x03 kΩ, 0x04 MΩ |
 
-**value = (-1)^sign × (d1·1000 + d2·100 + d3·10 + d4) / 10^dec**
+**value = (-1)^sign × (d1·1000 + d2·100 + d3·10 + d4) / 10^dec**, and
+**overload ("OL")** when any digit byte > 9.
 
-Implemented as `protocol.decode_dmm()` with real frames as unit-test fixtures,
+Implemented as `protocol.decode_dmm()` (byte-3 mode table `DMM_MODES`, ohm
+ranges `DMM_OHM_UNITS`) with real frames as unit-test fixtures,
 `device.read_dmm()`, `capture.DmmWorker`, and a live `gui/dmm_tab.py`.
 
-### Still TODO (needs more captures, easy via dmm_decode_session.py)
-- Mode/unit bytes for **AC volts, DC/AC current, resistance, continuity,
-  capacitance, diode** — capture one reading in each mode and add the
-  `(byte4, byte11, byte12)` tuple to `protocol.DMM_MODES`. The numeric value
-  already decodes correctly for every mode; only the unit label is missing.
-- **Overload ("OL")** representation — capture an over-range reading.
+### Still TODO (needs captures, easy via dmm_decode_session.py)
+- Label the remaining modes. **byte 3 is the mode selector**; add each new code
+  to `protocol.DMM_MODES` (and, if it has scaled units like current, a range
+  table). Observed but not yet labelled: **byte 3 = 0x01** (seen at rest,
+  byte12=0x00 — likely AC volts; needs a known-input capture to confirm the
+  unit). Still to capture: **AC volts, DC/AC current, capacitance, diode**.
+  The numeric value already decodes for any mode; only the unit label is missing.
 - Confirm the **sign** byte with a genuinely negative input (reversed leads).

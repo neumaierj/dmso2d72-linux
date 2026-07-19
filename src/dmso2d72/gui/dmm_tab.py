@@ -107,13 +107,11 @@ class DmmTab(QWidget):
             self.value_label.setText("—")
             self.mode_label.setText("device not in multimeter mode")
             return
-        if reading.unit:
-            self.value_label.setText(reading.formatted())
-            self.mode_label.setText(reading.mode)
-        else:
-            # Unknown mode: show the number, flag the unit as not yet decoded.
-            self.value_label.setText(f"{reading.value:.{reading.decimals}f}")
+        self.value_label.setText(reading.formatted())
+        if reading.mode == "unknown":
             self.mode_label.setText("unknown mode (unit not decoded yet)")
+        else:
+            self.mode_label.setText(reading.mode)
 
     def set_device(self, device: Dmso2d72 | None):
         self._stop_worker()

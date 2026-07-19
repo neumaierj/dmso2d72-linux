@@ -109,11 +109,50 @@ def test_decode_dmm_matches_screen(hexframe, expected, decimals):
     assert r.decimals == decimals
     assert r.mode == "DC Voltage"
     assert r.unit == "V"
+    assert r.overload is False
 
 
 def test_decode_dmm_formatted():
     r = p.decode_dmm(bytes.fromhex("550b010a01000303020908050155"))
     assert r.formatted() == "3.298 V"
+
+
+# Real resistance/continuity frames captured from the device.
+def test_decode_dmm_resistance_kohm():
+    r = p.decode_dmm(bytes.fromhex("550b010800000300090905030255"))
+    assert r.mode == "Resistance"
+    assert r.unit == "kΩ"
+    assert r.value == pytest.approx(0.995)
+    assert r.formatted() == "0.995 kΩ"
+
+
+def test_decode_dmm_resistance_ohm():
+    r = p.decode_dmm(bytes.fromhex("550b010800000100000002050255"))
+    assert r.mode == "Resistance"
+    assert r.unit == "Ω"
+    assert r.value == pytest.approx(0.2)
+
+
+def test_decode_dmm_resistance_overload():
+    r = p.decode_dmm(bytes.fromhex("550b0108000002ff004cff040255"))
+    assert r.mode == "Resistance"
+    assert r.overload is True
+    assert r.value is None
+    assert r.formatted() == "OL MΩ"
+
+
+def test_decode_dmm_continuity():
+    r = p.decode_dmm(bytes.fromhex("550b010900000100000000050255"))
+    assert r.mode == "Continuity"
+    assert r.unit == "Ω"
+    assert r.value == pytest.approx(0.0)
+
+
+def test_decode_dmm_continuity_overload():
+    r = p.decode_dmm(bytes.fromhex("550b0109000001ff004cff050255"))
+    assert r.mode == "Continuity"
+    assert r.overload is True
+    assert r.formatted() == "OL Ω"
 
 
 def test_decode_dmm_sign():
