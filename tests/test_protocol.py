@@ -180,12 +180,27 @@ def test_decode_dmm_more_modes(hexframe, mode, unit, value):
     assert r.value == pytest.approx(value)
 
 
-def test_decode_dmm_diode_reports_volts():
-    # diode-test mode reports as DC volts (byte 3 = 0x0a); 0.599 V drop
+def test_decode_dmm_diode():
+    # diode test shares byte3=0x0a with DC volts but has byte4=0x00; 0.599 V drop
     r = p.decode_dmm(bytes.fromhex("550b010a00000300050909050155"))
-    assert r.mode == "DC Voltage"
+    assert r.mode == "Diode"
     assert r.unit == "V"
     assert r.value == pytest.approx(0.599)
+
+
+def test_decode_dmm_diode_open_is_overload():
+    # open leads in diode mode -> OL
+    r = p.decode_dmm(bytes.fromhex("550b010a000003ff004cff050155"))
+    assert r.mode == "Diode"
+    assert r.overload is True
+    assert r.formatted() == "OL V"
+
+
+def test_decode_dmm_dcv_vs_diode_differ_only_in_byte4():
+    dcv = p.decode_dmm(bytes.fromhex("550b010a01000300000000050155"))
+    diode = p.decode_dmm(bytes.fromhex("550b010a00000300000000050155"))
+    assert dcv.mode == "DC Voltage"
+    assert diode.mode == "Diode"
 
 
 def test_decode_dmm_sign():

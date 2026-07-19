@@ -142,7 +142,8 @@ bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 | 0, 13   | framing | constant 0x55 |
 | 1       | length? | constant 0x0b |
 | 2       | func echo | 0x01 |
-| **3**   | **measurement mode** (see table below) | selects type + coarse range |
+| **3**   | measurement type + range | see mode table |
+| **4**   | AC/DC flag | 0x01 DC, 0x02 AC, 0x00 other; with byte 3 selects mode |
 | 5       | sign | 0 = positive, 1 = negative |
 | 6       | decimal places | 3 → `X.XXX`, 2 → `XX.XX`, … (auto-range) |
 | 7..10   | 4 display digits | plain binary 0..9 MSB-first, **or `ff 00 4c ff` = OL** |
@@ -151,25 +152,26 @@ bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 **value = (-1)^sign × (d1·1000 + d2·100 + d3·10 + d4) / 10^dec**, and
 **overload ("OL")** when any digit byte > 9.
 
-**byte 3 = mode** (verified against screen; byte 3 encodes type *and* coarse
-range, so V vs mV are different codes — auto-ranging within a code uses byte 6):
+**mode = (byte 3, byte 4)** (verified against screen). byte 3 encodes the
+measurement type *and* coarse range (so V vs mV are different codes; auto-ranging
+within a code uses byte 6). **byte 4 is the AC/DC/other flag** (0x01 DC, 0x02 AC,
+0x00 resistance/continuity/capacitance/diode) — it is *not* redundant: **DC volts
+and diode-test share byte 3 = 0x0a and differ only in byte 4**, because in diode
+mode the device sources its own test voltage. The pair is the reliable key:
 
-| byte 3 | mode | unit |
-|-------:|------|------|
-| 0x00 | AC Current | A |
-| 0x01 | DC Current | A |
-| 0x02 | AC Current | mA |
-| 0x03 | DC Current | mA |
-| 0x04 | DC Voltage | mV |
-| 0x06 | AC Voltage | V |
-| 0x07 | Capacitance | nF |
-| 0x08 | Resistance | Ω / kΩ / MΩ (byte 11) |
-| 0x09 | Continuity | Ω |
-| 0x0a | DC Voltage | V |
-
-Diode-test reports as DC volts (0x0a), e.g. 0.599 V. byte 4 is an AC/DC flag
-(DC = 0x01, AC = 0x02, Ω/continuity/capacitance = 0x00) but is redundant with
-byte 3 for decoding.
+| byte 3 | byte 4 | mode | unit |
+|-------:|-------:|------|------|
+| 0x00 | 0x02 | AC Current | A |
+| 0x01 | 0x01 | DC Current | A |
+| 0x02 | 0x02 | AC Current | mA |
+| 0x03 | 0x01 | DC Current | mA |
+| 0x04 | 0x01 | DC Voltage | mV |
+| 0x06 | 0x02 | AC Voltage | V |
+| 0x07 | 0x00 | Capacitance | nF |
+| 0x08 | 0x00 | Resistance | Ω / kΩ / MΩ (byte 11) |
+| 0x09 | 0x00 | Continuity | Ω |
+| 0x0a | 0x00 | Diode | V (e.g. 0.599; open = OL) |
+| 0x0a | 0x01 | DC Voltage | V |
 
 Implemented as `protocol.decode_dmm()` (byte-3 mode table `DMM_MODES`, ohm
 ranges `DMM_OHM_UNITS`) with real frames as unit-test fixtures,

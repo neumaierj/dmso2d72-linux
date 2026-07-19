@@ -264,24 +264,27 @@ DMM_FRAME_START = 0x55
 
 OHM = "Ω"
 
-DMM_MODE_OHM = 0x08  # resistance: unit comes from the range byte (byte 11)
+DMM_MODE_OHM = 0x08  # byte 3 for resistance: unit comes from the range byte 11
 
-# byte 3 -> (mode name, fixed unit), all verified against the device screen.
-# byte 3 selects both the measurement type and its coarse range, so e.g. the
-# volts (0x0a) and millivolts (0x04) positions are distinct codes; auto-ranging
-# within a code adjusts the decimal-places byte. A None unit means "derive from
-# the range byte" (resistance). Diode-test reports as DC volts (0x0a).
+# (byte 3, byte 4) -> (mode name, fixed unit), all verified against the device
+# screen. byte 3 selects the measurement type + coarse range (so volts 0x0a and
+# millivolts 0x04 are distinct codes; auto-ranging within a code adjusts the
+# decimal-places byte). byte 4 is the AC/DC/other flag (0x01 DC, 0x02 AC, 0x00
+# resistance/continuity/capacitance/diode). The pair is needed because DC volts
+# and diode-test share byte 3 = 0x0a and differ only in byte 4. A None unit
+# means "derive from the range byte" (resistance).
 DMM_MODES = {
-    0x00: ("AC Current", "A"),
-    0x01: ("DC Current", "A"),
-    0x02: ("AC Current", "mA"),
-    0x03: ("DC Current", "mA"),
-    0x04: ("DC Voltage", "mV"),
-    0x06: ("AC Voltage", "V"),
-    0x07: ("Capacitance", "nF"),
-    DMM_MODE_OHM: ("Resistance", None),
-    0x09: ("Continuity", OHM),
-    0x0A: ("DC Voltage", "V"),
+    (0x0A, 0x01): ("DC Voltage", "V"),
+    (0x0A, 0x00): ("Diode", "V"),
+    (0x04, 0x01): ("DC Voltage", "mV"),
+    (0x06, 0x02): ("AC Voltage", "V"),
+    (0x01, 0x01): ("DC Current", "A"),
+    (0x00, 0x02): ("AC Current", "A"),
+    (0x03, 0x01): ("DC Current", "mA"),
+    (0x02, 0x02): ("AC Current", "mA"),
+    (DMM_MODE_OHM, 0x00): ("Resistance", None),
+    (0x09, 0x00): ("Continuity", OHM),
+    (0x07, 0x00): ("Capacitance", "nF"),
 }
 
 # resistance range: byte 11 -> unit prefix
@@ -331,7 +334,7 @@ def decode_dmm(frame: bytes) -> DmmReading:
         if negative:
             value = -value
 
-    mode, fixed_unit = DMM_MODES.get(frame[3], ("unknown", ""))
+    mode, fixed_unit = DMM_MODES.get((frame[3], frame[4]), ("unknown", ""))
     if frame[3] == DMM_MODE_OHM:
         unit = DMM_OHM_UNITS.get(frame[11], OHM)
     else:
