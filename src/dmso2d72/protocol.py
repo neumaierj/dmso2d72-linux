@@ -241,54 +241,52 @@ def raw_to_divisions(raw: int) -> float:
 # --------------------------------------------------------------------- DMM ---
 #
 # The multimeter value frame (reply to FUNC_DMM_STATUS) is 14 bytes, verified
-# against the device screen for DC volts, resistance and continuity
-# (re/dmm_log.jsonl):
+# against the device screen across every front-panel mode (re/dmm_log.jsonl):
 #
-#   offset:  0    1    2    3     4    5     6      7   8   9  10    11    12   13
-#   bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
+#   offset:  0    1    2    3    4    5    6     7   8   9  10   11    12   13
+#   bytes:  0x55 0x0b 0x01  ?  ac/dc sign dec   d1  d2  d3  d4  range cat 0x55
 #
-#   - byte 3  = measurement mode: 0x0a DC volts, 0x08 resistance, 0x09 continuity
+#   - byte 4  = AC/DC/other flag: 0x01 DC, 0x02 AC, 0x00 (resistance/continuity/
+#               capacitance/diode)
 #   - byte 5  = sign (0 positive, 1 negative)
 #   - byte 6  = number of decimal places (auto-range: 3 -> X.XXX, 2 -> XX.XX ...)
 #   - bytes 7..10 = the four displayed digits, most significant first, each a
 #                   plain binary 0..9 -- OR an overload sentinel (0xff...) when
 #                   the reading is over range ("OL" on screen)
-#   - byte 11 = range/unit prefix (resistance: 0x05 ohm, 0x03 kohm, 0x04 Mohm)
+#   - byte 11 = range within the category: 0x05 base (V/A/Ω), 0x02 milli (mV/mA),
+#               0x03 kΩ, 0x04 MΩ, 0x00 nF
+#   - byte 12 = measurement category: 0x00 current, 0x01 voltage, 0x02
+#               resistance/continuity, 0x03 capacitance
 #   - value = (-1)**sign * (d1*1000 + d2*100 + d3*10 + d4) / 10**dec
 #
-# Still to capture: AC volts, DC/AC current, capacitance, diode (add their byte-3
-# code and unit below). The numeric decode already works for any mode.
+# NOTE: byte 3 is NOT a reliable mode selector -- it changes with polarity (e.g.
+# positive DC volts = 0x0a, negative = 0x05), so the mode is keyed on
+# (byte 4, byte 12) instead. byte 3 is only used to tell resistance (0x08) from
+# continuity (0x09), which share (byte4=0, byte12=2) and are always positive.
 
 DMM_FRAME_LEN = 14
 DMM_FRAME_START = 0x55
 
 OHM = "Ω"
 
-DMM_MODE_OHM = 0x08  # byte 3 for resistance: unit comes from the range byte 11
-
-# (byte 3, byte 4) -> (mode name, fixed unit), all verified against the device
-# screen. byte 3 selects the measurement type + coarse range (so volts 0x0a and
-# millivolts 0x04 are distinct codes; auto-ranging within a code adjusts the
-# decimal-places byte). byte 4 is the AC/DC/other flag (0x01 DC, 0x02 AC, 0x00
-# resistance/continuity/capacitance/diode). The pair is needed because DC volts
-# and diode-test share byte 3 = 0x0a and differ only in byte 4. A None unit
-# means "derive from the range byte" (resistance).
-DMM_MODES = {
-    (0x0A, 0x01): ("DC Voltage", "V"),
-    (0x0A, 0x00): ("Diode", "V"),
-    (0x04, 0x01): ("DC Voltage", "mV"),
-    (0x06, 0x02): ("AC Voltage", "V"),
-    (0x01, 0x01): ("DC Current", "A"),
-    (0x00, 0x02): ("AC Current", "A"),
-    (0x03, 0x01): ("DC Current", "mA"),
-    (0x02, 0x02): ("AC Current", "mA"),
-    (DMM_MODE_OHM, 0x00): ("Resistance", None),
-    (0x09, 0x00): ("Continuity", OHM),
-    (0x07, 0x00): ("Capacitance", "nF"),
+# (byte 4, byte 12) -> measurement type, verified against the device screen.
+DMM_TYPES = {
+    (0x01, 0x01): "DC Voltage",
+    (0x02, 0x01): "AC Voltage",
+    (0x00, 0x01): "Diode",
+    (0x01, 0x00): "DC Current",
+    (0x02, 0x00): "AC Current",
+    (0x00, 0x03): "Capacitance",
+    # (0x00, 0x02) is resistance or continuity, split by byte 3 below.
 }
 
-# resistance range: byte 11 -> unit prefix
-DMM_OHM_UNITS = {0x05: OHM, 0x03: "k" + OHM, 0x04: "M" + OHM}
+# category (byte 12) -> {range (byte 11) -> unit}
+DMM_UNITS = {
+    0x01: {0x05: "V", 0x02: "mV"},                        # voltage / diode
+    0x00: {0x05: "A", 0x02: "mA"},                        # current
+    0x02: {0x05: OHM, 0x03: "k" + OHM, 0x04: "M" + OHM},  # resistance/continuity
+    0x03: {0x00: "nF"},                                   # capacitance (µF TBD)
+}
 
 
 class DmmReading:
@@ -334,9 +332,10 @@ def decode_dmm(frame: bytes) -> DmmReading:
         if negative:
             value = -value
 
-    mode, fixed_unit = DMM_MODES.get((frame[3], frame[4]), ("unknown", ""))
-    if frame[3] == DMM_MODE_OHM:
-        unit = DMM_OHM_UNITS.get(frame[11], OHM)
+    ac_dc, category = frame[4], frame[12]
+    if (ac_dc, category) == (0x00, 0x02):
+        mode = "Continuity" if frame[3] == 0x09 else "Resistance"
     else:
-        unit = fixed_unit if fixed_unit is not None else ""
+        mode = DMM_TYPES.get((ac_dc, category), "unknown")
+    unit = DMM_UNITS.get(category, {}).get(frame[11], "")
     return DmmReading(value, decimals, negative, mode, unit, overload, bytes(frame))

@@ -126,15 +126,15 @@ sweep included `func=0x0003` (screen select), which switched the device to
 scope/AWG. The decode session and normal reads never use `func=0x0003` except one
 explicit switch-to-DMM.
 
-## SOLVED — value frame decoded (DC volts, resistance, continuity)
+## SOLVED — value frame fully decoded (all modes, incl. negative and OL)
 
 The live value is the **`func=0x0101`** reply (not `0x0103`, which is a static
-config frame). It is 14 bytes, verified against the device screen for DC volts
-(0 V … 4.98 V incl. auto-range), resistance (Ω/kΩ/MΩ + OL) and continuity:
+config frame). It is 14 bytes, verified against the device screen across every
+front-panel mode, both signs and over-range:
 
 ```
-offset:  0    1    2    3     4    5     6      7   8   9  10    11    12   13
-bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
+offset:  0    1    2    3    4    5    6     7   8   9  10   11    12   13
+bytes:  0x55 0x0b 0x01  ?  ac/dc sign dec   d1  d2  d3  d4  range cat 0x55
 ```
 
 | byte(s) | meaning | encoding |
@@ -142,46 +142,46 @@ bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 | 0, 13   | framing | constant 0x55 |
 | 1       | length? | constant 0x0b |
 | 2       | func echo | 0x01 |
-| **3**   | measurement type + range | see mode table |
-| **4**   | AC/DC flag | 0x01 DC, 0x02 AC, 0x00 other; with byte 3 selects mode |
+| 3       | (unreliable) | changes with polarity — see note; not used for mode |
+| **4**   | AC/DC/other | 0x01 DC, 0x02 AC, 0x00 (Ω/continuity/cap/diode) |
 | 5       | sign | 0 = positive, 1 = negative |
 | 6       | decimal places | 3 → `X.XXX`, 2 → `XX.XX`, … (auto-range) |
 | 7..10   | 4 display digits | plain binary 0..9 MSB-first, **or `ff 00 4c ff` = OL** |
-| 11      | range / unit prefix | resistance: 0x05 Ω, 0x03 kΩ, 0x04 MΩ |
+| 11      | range | 0x05 base (V/A/Ω), 0x02 milli (mV/mA), 0x03 kΩ, 0x04 MΩ, 0x00 nF |
+| **12**  | category | 0x00 current, 0x01 voltage, 0x02 resistance/cont, 0x03 capacitance |
 
 **value = (-1)^sign × (d1·1000 + d2·100 + d3·10 + d4) / 10^dec**, and
 **overload ("OL")** when any digit byte > 9.
 
-**mode = (byte 3, byte 4)** (verified against screen). byte 3 encodes the
-measurement type *and* coarse range (so V vs mV are different codes; auto-ranging
-within a code uses byte 6). **byte 4 is the AC/DC/other flag** (0x01 DC, 0x02 AC,
-0x00 resistance/continuity/capacitance/diode) — it is *not* redundant: **DC volts
-and diode-test share byte 3 = 0x0a and differ only in byte 4**, because in diode
-mode the device sources its own test voltage. The pair is the reliable key:
+**mode = (byte 4, byte 12)**, unit = f(byte 12 category, byte 11 range).
+byte 4 splits AC/DC and marks diode (0x00, category voltage); resistance vs
+continuity share (byte4=0x00, byte12=0x02) and are split by byte 3 (0x09 =
+continuity, else resistance — both are always positive so byte 3 is stable there).
 
-| byte 3 | byte 4 | mode | unit |
-|-------:|-------:|------|------|
-| 0x00 | 0x02 | AC Current | A |
-| 0x01 | 0x01 | DC Current | A |
-| 0x02 | 0x02 | AC Current | mA |
-| 0x03 | 0x01 | DC Current | mA |
-| 0x04 | 0x01 | DC Voltage | mV |
-| 0x06 | 0x02 | AC Voltage | V |
-| 0x07 | 0x00 | Capacitance | nF |
-| 0x08 | 0x00 | Resistance | Ω / kΩ / MΩ (byte 11) |
-| 0x09 | 0x00 | Continuity | Ω |
-| 0x0a | 0x00 | Diode | V (e.g. 0.599; open = OL) |
-| 0x0a | 0x01 | DC Voltage | V |
+⚠️ **byte 3 is NOT the mode.** It changes with polarity (positive DC volts =
+0x0a, **negative = 0x05**), which is why an earlier byte-3 mode table
+mislabelled negative readings. Keying on (byte 4, byte 12) fixes this.
 
-Implemented as `protocol.decode_dmm()` (byte-3 mode table `DMM_MODES`, ohm
-ranges `DMM_OHM_UNITS`) with real frames as unit-test fixtures,
-`device.read_dmm()`, `capture.DmmWorker`, and a live `gui/dmm_tab.py`.
+| byte4 | byte12 | mode | unit (from byte 11) |
+|------:|-------:|------|------|
+| 0x01 | 0x01 | DC Voltage | 0x05 V, 0x02 mV |
+| 0x02 | 0x01 | AC Voltage | 0x05 V, 0x02 mV |
+| 0x00 | 0x01 | Diode | V (e.g. 0.599; open = OL) |
+| 0x01 | 0x00 | DC Current | 0x05 A, 0x02 mA |
+| 0x02 | 0x00 | AC Current | 0x05 A, 0x02 mA |
+| 0x00 | 0x02 | Resistance / Continuity¹ | 0x05 Ω, 0x03 kΩ, 0x04 MΩ |
+| 0x00 | 0x03 | Capacitance | 0x00 nF |
+
+¹ split by byte 3: 0x09 continuity, 0x08 resistance.
+
+Implemented as `protocol.decode_dmm()` (`DMM_TYPES`, `DMM_UNITS`) with real
+frames as unit-test fixtures, `device.read_dmm()`, `capture.DmmWorker`, and a
+live `gui/dmm_tab.py`.
 
 ### Remaining (minor)
-- All front-panel DMM modes are now decoded (DC/AC volts, DC/AC current in both
-  A and mA ranges, resistance, continuity, capacitance, diode).
-- **Higher sub-ranges** only seen at their base: capacitance beyond nF (µF?) and
-  resistance/current edge ranges may use another range byte — capture a large
-  value in each to confirm the prefix. Current numeric value is always correct;
-  only the unit prefix could differ.
-- Confirm the **sign** byte with a genuinely negative input (reversed leads).
+- All front-panel DMM modes are decoded (DC/AC volts inc. mV, DC/AC current inc.
+  mA, resistance Ω/kΩ/MΩ, continuity, capacitance, diode), both signs and OL.
+- **Higher sub-ranges** only seen at their base: capacitance beyond nF (µF range
+  not yet captured — needs a large cap). The numeric value is always correct;
+  only the µF unit prefix would be missing until captured.
+- Sign confirmed with a genuine negative reading (DC -1.997 V).

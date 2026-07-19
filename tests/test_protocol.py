@@ -203,6 +203,24 @@ def test_decode_dmm_dcv_vs_diode_differ_only_in_byte4():
     assert diode.mode == "Diode"
 
 
+def test_decode_dmm_negative_voltage():
+    # negative DC volts uses byte3=0x05 (positive uses 0x0a); mode must still be
+    # DC Voltage because it is keyed on byte4/byte12, not byte3.
+    r = p.decode_dmm(bytes.fromhex("550b010501010301090907050155"))
+    assert r.mode == "DC Voltage"
+    assert r.unit == "V"
+    assert r.negative is True
+    assert r.value == pytest.approx(-1.997)
+
+
+def test_decode_dmm_millivolts_and_capacitance():
+    mv = p.decode_dmm(bytes.fromhex("550b010401000101000002020155"))
+    assert mv.mode == "DC Voltage" and mv.unit == "mV"
+    nf = p.decode_dmm(bytes.fromhex("550b010700000200000004000355"))
+    assert nf.mode == "Capacitance" and nf.unit == "nF"
+    assert nf.value == pytest.approx(0.04)
+
+
 def test_decode_dmm_sign():
     # byte 5 = 1 marks a negative reading
     frame = bytearray.fromhex("550b010a01000301040909050155")
