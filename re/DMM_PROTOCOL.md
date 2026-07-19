@@ -96,6 +96,36 @@ what is physically on the DMM inputs; every frame is logged to `re/dmm_log.jsonl
 
 Fill in the decode table below as results arrive.
 
+## Hardware probe results (2026-07-19) — read channel FOUND
+
+`tools/dmm_probe.py --find` on the real device: **`func=0x0001` and `func=0x0003`
+return nothing; `func=0x0101` and `func=0x0103` return data** (independent of the
+low `cmd` byte for 0x0101; `cmd` selects a sub-frame for 0x0103).
+
+- **`func=0x0101`** → constant 14-byte status frame:
+  `55 0b 01 0a 00 00 03 00 00 00 00 05 01 55`
+  Framing `55 … 55`; likely holds mode/range (`03`, `05`, `01` stand out).
+- **`func=0x0103`** → data frames, selected by `cmd`:
+  - `cmd=0x01..0x05` → 16 bytes: `55 0b 03 01 | 57 06 75 40 30 37 57 41 05 d4 ff 39`
+  - `cmd=0x06` → same payload, 64-byte zero-padded, header `55 0b 03 02 00 06 …`
+  - `cmd=0x00`,`0x07`,`0x08` → 5-byte headers `55 0b 03 0X 01`
+  - Common framing: `55` start, `0b` const, byte2 = func low byte echo,
+    byte3 = sub-frame id, then payload.
+
+**Open problem:** the `func=0x0103/cmd=0x01` data frame is **byte-identical over
+30 samples and unchanged from a capture 30 min earlier** — no last-digit jitter.
+So it is either (a) the live value and simply very stable, or (b) a config/ID
+frame, not the reading. Cannot be resolved without changing a known input and
+re-capturing. → run `tools/dmm_decode_session.py` (guided) to capture frames for
+open/short leads, 1.5 V, 9 V, and a resistor, each labelled with the device's own
+screen reading. Comparing frames across inputs will reveal which bytes are the
+value/mode/range.
+
+Note: the random mode-switching seen during `--find` was self-inflicted — the
+sweep included `func=0x0003` (screen select), which switched the device to
+scope/AWG. The decode session and normal reads never use `func=0x0003` except one
+explicit switch-to-DMM.
+
 ## Decode table (to be completed from hardware)
 
 | byte(s) | meaning | encoding | evidence |
