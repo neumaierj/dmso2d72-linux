@@ -142,7 +142,7 @@ bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 | 0, 13   | framing | constant 0x55 |
 | 1       | length? | constant 0x0b |
 | 2       | func echo | 0x01 |
-| **3**   | **measurement mode** | **0x0a DC volts, 0x08 resistance, 0x09 continuity** |
+| **3**   | **measurement mode** | **0x0a DC volts, 0x01 DC current, 0x08 resistance, 0x09 continuity** |
 | 5       | sign | 0 = positive, 1 = negative |
 | 6       | decimal places | 3 → `X.XXX`, 2 → `XX.XX`, … (auto-range) |
 | 7..10   | 4 display digits | plain binary 0..9 MSB-first, **or `ff 00 4c ff` = OL** |
@@ -157,9 +157,11 @@ ranges `DMM_OHM_UNITS`) with real frames as unit-test fixtures,
 
 ### Still TODO (needs captures, easy via dmm_decode_session.py)
 - Label the remaining modes. **byte 3 is the mode selector**; add each new code
-  to `protocol.DMM_MODES` (and, if it has scaled units like current, a range
-  table). Observed but not yet labelled: **byte 3 = 0x01** (seen at rest,
-  byte12=0x00 — likely AC volts; needs a known-input capture to confirm the
-  unit). Still to capture: **AC volts, DC/AC current, capacitance, diode**.
-  The numeric value already decodes for any mode; only the unit label is missing.
+  to `protocol.DMM_MODES`. Still to capture: **AC volts, AC current,
+  capacitance, diode**. The numeric value already decodes for any mode; only the
+  unit label is missing.
+- **DC current (byte 3 = 0x01)** is labelled with base unit **A** (screen
+  confirmed). Only the base range (byte 11 = 0x05) has been seen; if the device
+  auto-ranges current to mA/µA it likely uses byte 11 like resistance — capture a
+  non-zero current in a lower range to confirm and add a range table.
 - Confirm the **sign** byte with a genuinely negative input (reversed leads).

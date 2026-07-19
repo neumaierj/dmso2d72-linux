@@ -15,10 +15,10 @@ Linux GUI.
 - **Multimeter**: live readings over USB. The DMM protocol was reverse-
   engineered for this project by probing the device and correlating the data
   stream with known inputs (see [re/DMM_PROTOCOL.md](re/DMM_PROTOCOL.md)).
-  **DC volts, resistance and continuity are decoded** (value, sign, auto-range,
-  Ω/kΩ/MΩ, and over-range "OL"). Remaining modes (AC volts, current, ...) show
-  the correct number but their unit label still needs a capture in each mode —
-  easy to add with `tools/dmm_decode_session.py`.
+  **DC volts, DC current, resistance and continuity are decoded** (value, sign,
+  auto-range, Ω/kΩ/MΩ, and over-range "OL"). Remaining modes (AC volts, AC
+  current, ...) show the correct number but their unit label still needs a
+  capture in each mode — easy to add with `tools/dmm_decode_session.py`.
 
 ## Installation
 

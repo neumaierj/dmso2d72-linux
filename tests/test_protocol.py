@@ -155,6 +155,14 @@ def test_decode_dmm_continuity_overload():
     assert r.formatted() == "OL Ω"
 
 
+def test_decode_dmm_dc_current():
+    # captured in DC-Amp mode at rest (screen shows amps)
+    r = p.decode_dmm(bytes.fromhex("550b010101010300000000050055"))
+    assert r.mode == "DC Current"
+    assert r.unit == "A"
+    assert r.value == pytest.approx(0.0)
+
+
 def test_decode_dmm_sign():
     # byte 5 = 1 marks a negative reading
     frame = bytearray.fromhex("550b010a01000301040909050155")

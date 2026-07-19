@@ -264,14 +264,16 @@ DMM_FRAME_START = 0x55
 
 OHM = "Ω"
 
-DMM_MODE_DCV = 0x0A
+DMM_MODE_DCA = 0x01
 DMM_MODE_OHM = 0x08
 DMM_MODE_CONTINUITY = 0x09
+DMM_MODE_DCV = 0x0A
 
 # byte 3 -> (mode name, fixed unit). A None unit means "derive from the range
 # byte" (used for resistance). Extend as more modes are captured.
 DMM_MODES = {
     DMM_MODE_DCV: ("DC Voltage", "V"),
+    DMM_MODE_DCA: ("DC Current", "A"),
     DMM_MODE_OHM: ("Resistance", None),
     DMM_MODE_CONTINUITY: ("Continuity", OHM),
 }
