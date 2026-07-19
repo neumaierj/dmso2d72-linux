@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dmso2d72"
+version = "0.1.0"
+description = "Linux interface for the Joy-IT DMSO2D72 / Hantek 2D72 handheld oscilloscope"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
+    "pyusb>=1.2",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.gui-scripts]
+dmso2d72 = "dmso2d72.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
