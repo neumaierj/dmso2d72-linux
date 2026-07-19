@@ -14,7 +14,9 @@ class CaptureWorker(QThread):
     failed with a message if the device stops responding (then exits).
     """
 
-    data_ready = Signal(dict)
+    # Signal(object), not Signal(dict): the payload has int channel keys,
+    # which cannot convert to QVariantMap.
+    data_ready = Signal(object)
     failed = Signal(str)
 
     def __init__(self, device: Dmso2d72, channels: list[int], num_samples: int, parent=None):
