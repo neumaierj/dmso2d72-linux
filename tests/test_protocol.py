@@ -221,6 +221,16 @@ def test_decode_dmm_millivolts_and_capacitance():
     assert nf.value == pytest.approx(0.04)
 
 
+def test_decode_dmm_capacitance_uf_overrange():
+    # 206 µF cap on the device: exceeds its 100 µF max -> device reports OL in
+    # the µF range (byte 11 = 0x01). This is correct over-range behaviour.
+    r = p.decode_dmm(bytes.fromhex("550b0107000001ff004cff010355"))
+    assert r.mode == "Capacitance"
+    assert r.unit == "µF"
+    assert r.overload is True
+    assert r.formatted() == "OL µF"
+
+
 def test_decode_dmm_sign():
     # byte 5 = 1 marks a negative reading
     frame = bytearray.fromhex("550b010a01000301040909050155")

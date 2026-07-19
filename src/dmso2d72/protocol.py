@@ -285,7 +285,7 @@ DMM_UNITS = {
     0x01: {0x05: "V", 0x02: "mV"},                        # voltage / diode
     0x00: {0x05: "A", 0x02: "mA"},                        # current
     0x02: {0x05: OHM, 0x03: "k" + OHM, 0x04: "M" + OHM},  # resistance/continuity
-    0x03: {0x00: "nF"},                                   # capacitance (µF TBD)
+    0x03: {0x00: "nF", 0x01: "µF"},                       # capacitance
 }
 
 
