@@ -264,18 +264,24 @@ DMM_FRAME_START = 0x55
 
 OHM = "Ω"
 
-DMM_MODE_DCA = 0x01
-DMM_MODE_OHM = 0x08
-DMM_MODE_CONTINUITY = 0x09
-DMM_MODE_DCV = 0x0A
+DMM_MODE_OHM = 0x08  # resistance: unit comes from the range byte (byte 11)
 
-# byte 3 -> (mode name, fixed unit). A None unit means "derive from the range
-# byte" (used for resistance). Extend as more modes are captured.
+# byte 3 -> (mode name, fixed unit), all verified against the device screen.
+# byte 3 selects both the measurement type and its coarse range, so e.g. the
+# volts (0x0a) and millivolts (0x04) positions are distinct codes; auto-ranging
+# within a code adjusts the decimal-places byte. A None unit means "derive from
+# the range byte" (resistance). Diode-test reports as DC volts (0x0a).
 DMM_MODES = {
-    DMM_MODE_DCV: ("DC Voltage", "V"),
-    DMM_MODE_DCA: ("DC Current", "A"),
+    0x00: ("AC Current", "A"),
+    0x01: ("DC Current", "A"),
+    0x02: ("AC Current", "mA"),
+    0x03: ("DC Current", "mA"),
+    0x04: ("DC Voltage", "mV"),
+    0x06: ("AC Voltage", "V"),
+    0x07: ("Capacitance", "nF"),
     DMM_MODE_OHM: ("Resistance", None),
-    DMM_MODE_CONTINUITY: ("Continuity", OHM),
+    0x09: ("Continuity", OHM),
+    0x0A: ("DC Voltage", "V"),
 }
 
 # resistance range: byte 11 -> unit prefix

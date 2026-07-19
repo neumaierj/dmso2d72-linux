@@ -142,7 +142,7 @@ bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 | 0, 13   | framing | constant 0x55 |
 | 1       | length? | constant 0x0b |
 | 2       | func echo | 0x01 |
-| **3**   | **measurement mode** | **0x0a DC volts, 0x01 DC current, 0x08 resistance, 0x09 continuity** |
+| **3**   | **measurement mode** (see table below) | selects type + coarse range |
 | 5       | sign | 0 = positive, 1 = negative |
 | 6       | decimal places | 3 → `X.XXX`, 2 → `XX.XX`, … (auto-range) |
 | 7..10   | 4 display digits | plain binary 0..9 MSB-first, **or `ff 00 4c ff` = OL** |
@@ -151,17 +151,35 @@ bytes:  0x55 0x0b 0x01 mode  ?   sign  dec    d1  d2  d3  d4   range  ?  0x55
 **value = (-1)^sign × (d1·1000 + d2·100 + d3·10 + d4) / 10^dec**, and
 **overload ("OL")** when any digit byte > 9.
 
+**byte 3 = mode** (verified against screen; byte 3 encodes type *and* coarse
+range, so V vs mV are different codes — auto-ranging within a code uses byte 6):
+
+| byte 3 | mode | unit |
+|-------:|------|------|
+| 0x00 | AC Current | A |
+| 0x01 | DC Current | A |
+| 0x02 | AC Current | mA |
+| 0x03 | DC Current | mA |
+| 0x04 | DC Voltage | mV |
+| 0x06 | AC Voltage | V |
+| 0x07 | Capacitance | nF |
+| 0x08 | Resistance | Ω / kΩ / MΩ (byte 11) |
+| 0x09 | Continuity | Ω |
+| 0x0a | DC Voltage | V |
+
+Diode-test reports as DC volts (0x0a), e.g. 0.599 V. byte 4 is an AC/DC flag
+(DC = 0x01, AC = 0x02, Ω/continuity/capacitance = 0x00) but is redundant with
+byte 3 for decoding.
+
 Implemented as `protocol.decode_dmm()` (byte-3 mode table `DMM_MODES`, ohm
 ranges `DMM_OHM_UNITS`) with real frames as unit-test fixtures,
 `device.read_dmm()`, `capture.DmmWorker`, and a live `gui/dmm_tab.py`.
 
-### Still TODO (needs captures, easy via dmm_decode_session.py)
-- Label the remaining modes. **byte 3 is the mode selector**; add each new code
-  to `protocol.DMM_MODES`. Still to capture: **AC volts, AC current,
-  capacitance, diode**. The numeric value already decodes for any mode; only the
-  unit label is missing.
-- **DC current (byte 3 = 0x01)** is labelled with base unit **A** (screen
-  confirmed). Only the base range (byte 11 = 0x05) has been seen; if the device
-  auto-ranges current to mA/µA it likely uses byte 11 like resistance — capture a
-  non-zero current in a lower range to confirm and add a range table.
+### Remaining (minor)
+- All front-panel DMM modes are now decoded (DC/AC volts, DC/AC current in both
+  A and mA ranges, resistance, continuity, capacitance, diode).
+- **Higher sub-ranges** only seen at their base: capacitance beyond nF (µF?) and
+  resistance/current edge ranges may use another range byte — capture a large
+  value in each to confirm the prefix. Current numeric value is always correct;
+  only the unit prefix could differ.
 - Confirm the **sign** byte with a genuinely negative input (reversed leads).

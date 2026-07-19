@@ -163,6 +163,31 @@ def test_decode_dmm_dc_current():
     assert r.value == pytest.approx(0.0)
 
 
+# Real frames for the remaining modes (byte 3 = mode), each paired with the
+# device's own screen reading.
+@pytest.mark.parametrize("hexframe,mode,unit,value", [
+    ("550b010002000300000000050055", "AC Current", "A", 0.0),      # AC 0.000 A
+    ("550b010602000300000000050155", "AC Voltage", "V", 0.0),      # AC 0.000 V
+    ("550b010301000201000005020055", "DC Current", "mA", 10.05),   # DC 10.05 mA
+    ("550b010401000101000002020155", "DC Voltage", "mV", 100.2),   # DC 100.2 mV
+    ("550b010202000200000000020055", "AC Current", "mA", 0.0),     # AC 00.00 mA
+    ("550b010700000300000000000355", "Capacitance", "nF", 0.0),    # 0.000 nF
+])
+def test_decode_dmm_more_modes(hexframe, mode, unit, value):
+    r = p.decode_dmm(bytes.fromhex(hexframe))
+    assert r.mode == mode
+    assert r.unit == unit
+    assert r.value == pytest.approx(value)
+
+
+def test_decode_dmm_diode_reports_volts():
+    # diode-test mode reports as DC volts (byte 3 = 0x0a); 0.599 V drop
+    r = p.decode_dmm(bytes.fromhex("550b010a00000300050909050155"))
+    assert r.mode == "DC Voltage"
+    assert r.unit == "V"
+    assert r.value == pytest.approx(0.599)
+
+
 def test_decode_dmm_sign():
     # byte 5 = 1 marks a negative reading
     frame = bytearray.fromhex("550b010a01000301040909050155")
