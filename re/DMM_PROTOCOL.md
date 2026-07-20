@@ -27,22 +27,24 @@ app).
 Static analysis with capstone (`analyze.py`, `dispatch.py`, `funcscan.py`,
 `context.py` in this directory). Confirmed by reading the disassembly:
 
-1. **The framing above is correct.** The command parser (around `0x08000a00`
-   and `0x08001300`) validates `magic == 0x0A` (byte offset 1 — this constant is
-   compared in exactly 3 places in the image) and then reads **func at offset 2
-   (halfword)**, **cmd at offset 4 (byte)**, and **value at offset 6**, exactly
-   matching `src/dmso2d72/protocol.py`. Example, at `0x080009e2`:
+1. ~~**The framing above is correct.** The command parser (around `0x08000a00`
+   and `0x08001300`) validates `magic == 0x0A` (byte offset 1) and then reads
+   func at offset 2, cmd at offset 4, value at offset 6.~~
+   **RETRACTED 2026-07-20 — this was a misreading.** See "Ghidra pass" below.
+   The function at `0x08000882` (containing the `cmp #0x0a` at `0x080009de`) is
+   the **USB chapter-9 standard setup handler**, not the vendor parser. The
+   byte at offset 1 is `bRequest`, and `0x0A` is `GET_INTERFACE` — not a magic
+   number. Offsets 2/4/6 are `wValue`/`wIndex`/`wLength` of the 8-byte SETUP
+   packet, which is why they lined up with func/cmd/value by coincidence.
 
-   ```
-   ... == 0x0A          ; magic
-   ldrh r0,[r0,#2]; cmp #0   ; func  == 0x0000
-   ldrb r0,[r0,#4]; cmp #0   ; cmd   == 0x00
-   ldrh r0,[r0,#6]; cmp #1   ; value == 1
-   blx  <handler>
-   ```
+   The 10-byte framing itself is still correct — it is proven empirically by
+   the scope, AWG and DMM code working against real hardware — but the
+   *firmware evidence* previously cited for it does not support it.
 
 2. There is a **long if/else dispatch chain** keyed on (func, cmd, value); each
    arm calls a handler. This is where a DMM command would live.
+   ⚠️ This claim came from the same scripted pass and should be treated as
+   unverified; the chain described above is the chapter-9 request dispatch.
 
 3. **Scripted disassembly could not reliably pin the exact DMM read command.**
    The firmware is stripped, the parser copies the packet pointer through several
@@ -254,3 +256,63 @@ mode/range in ways tied to the physical switch.
   a change that vanishes is an artifact, not a result.
 - The remaining honest lead is firmware analysis (interactive Ghidra, per the
   section above), not further blind sweeps of this function.
+
+## Ghidra pass (2026-07-20) — infrastructure mapped, no mode-set found
+
+Ghidra headless **works well here and supersedes the capstone scripts**
+(`analyze.py`, `dispatch.py`, `funcscan.py`), which mis-decoded data tables and
+recovered almost nothing usable. Reproduce with:
+
+```
+analyzeHeadless <proj> fw -import re/27D72_dump.bin \
+  -processor ARM:LE:32:Cortex -loader BinaryLoader -loader-baseAddr 0x08000000 \
+  -scriptPath re -preScript ghidra_Stm32Setup.java
+```
+
+`re/ghidra_Stm32Setup.java` adds the STM32F103VET6 memory map (SRAM
+`0x20000000`+64K, peripherals `0x40000000`, PPB `0xE0000000`) and seeds the
+vector table as Thumb code before auto-analysis. Needs JDK 21 (JDK 25 is
+rejected by Ghidra 12.1.2). Result: **1839 functions, 47987 instructions**,
+reset vector `0x08003020`.
+
+### Confirmed: the old "framing confirmed in firmware" claim was wrong
+
+`FUN_08000882` decompiles unambiguously to the USB standard request handler:
+it switches on `bRequest` = 6 `GET_DESCRIPTOR` / 0 `GET_STATUS` /
+8 `GET_CONFIGURATION` / **0x0A `GET_INTERFACE`**, and for `GET_DESCRIPTOR`
+picks between descriptor types 1/2/3 (DEVICE/CONFIG/STRING) by calling
+function pointers at struct offsets `0x1c`/`0x20`/`0x24`.
+
+Cross-check that settles it: those offsets are indices 7/8/9 of ST's
+`DEVICE_PROP` struct, and the table found at `0x08003300` has
+`[7]=0x0800140c`, `[8]=0x0800141a` — exactly `GetDeviceDescriptor` /
+`GetConfigDescriptor`. So `0x0A` is a USB request code, not the protocol magic.
+
+### What was mapped
+
+- USB device stack: 48 functions, `0x08000254`–`0x08000dxx`.
+- `DEVICE_PROP` table `0x08003300`; endpoint callback tables `0x08003358` /
+  `0x08003398`, almost all entries pointing at `NOP_Process` (`0x08000d30`).
+- Device-state variable `0x200007d8`, written with ST's state enum
+  (1 `ATTACHED`, 4 `ADDRESSED`, 5 `CONFIGURED`) by `0x08001014` / `0x08001028`.
+- DMM mode label strings exist — `DC V`, `AC V`, `DC A`, `AC A`, `DC mA`,
+  `AC mA`, `DC mV`, `OHM`, `Hold` — around `0x08022e00`–`0x08023070`.
+
+### What was NOT found (open)
+
+**No vendor command dispatcher and no DMM mode-set command.** Specifically:
+
+- `0x0101` and `0x0103` never appear as 16-bit immediates anywhere in the
+  image, so the func code is not compared as a halfword constant. It is
+  probably split into high/low byte tests, which are too generic to grep for.
+- Vendor commands arrive on **bulk** EP 0x02, so they are not handled by the
+  chapter-9 path above; the handler is a main-loop consumer of the endpoint
+  buffer that has not been located yet.
+- The mode strings have **zero** absolute pointers to them anywhere in flash,
+  so the label lookup is not a simple pointer table. Only ~275 words in the
+  whole 512K image look like flash pointers, so most data references are
+  PC-relative and won't be found by scanning for absolute addresses.
+
+Next: find the bulk EP2-OUT buffer consumer (trace from the USB ISR's endpoint
+handling into the main loop) — that is the entry point to the vendor dispatch,
+and the only place a DMM mode-set could live.
