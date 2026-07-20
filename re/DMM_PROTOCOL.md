@@ -316,3 +316,69 @@ Cross-check that settles it: those offsets are indices 7/8/9 of ST's
 Next: find the bulk EP2-OUT buffer consumer (trace from the USB ISR's endpoint
 handling into the main loop) — that is the entry point to the vendor dispatch,
 and the only place a DMM mode-set could live.
+
+## The image contains TWO firmware images (2026-07-20)
+
+This invalidates the addresses in the section above, and explains why the
+vendor dispatcher could not be found there.
+
+| | vector table | initial SP | reset | role |
+|-|-------------|-----------|-------|------|
+| **A** | `0x08000000` | `0x20000bf8` (~3 KB) | `0x08003020` | bootloader |
+| **B** | `0x08005000` | `0x2000f560` (~62 KB) | `0x08030b80` | **application** |
+
+Everything analysed in the Ghidra section above — the chapter-9 handler
+`FUN_08000882`, `DEVICE_PROP` at `0x08003300`, the all-`NOP_Process` endpoint
+tables — belongs to **image A, the bootloader**. That is why its endpoint
+callbacks are unused and no vendor commands appear there.
+
+The application (image B) has its **own** USB stack; its `USB_LP_CAN1_RX0`
+ISR is at `0x08030aae` and it carries a second copy of the ST USB helpers
+around `0x0802eb70` (`SetEPRxStatus`) / `0x0802ecb0` (`GetEPTxAddr`).
+Read image B's vector table at `0x08005000` (index = 16 + IRQ number) to find
+application ISRs. **The vendor command dispatcher is still not located, but it
+is in image B, not image A.**
+
+## SOLVED: remote mode-select is IMPOSSIBLE — the DMM link is one-way
+
+Found while looking for the EP2-OUT consumer, and it settles the question the
+`func=0x0001` probing could not.
+
+**The DMM is a separate measurement chip that streams to the STM32 over
+USART2, and the STM32 never talks back.**
+
+Evidence, all from image B:
+
+1. **The 14-byte frame arrives on USART2.** The ISR `FUN_08024d5c`
+   (vector `0x080050d8`) reads `USART_ReceiveData` and appends to a buffer at
+   `0x2000d46c`, indexed by `0x2000d554`; **when the index passes `0xd` it sets
+   a frame-ready flag at `0x2000d555` and resets** — i.e. exactly 14 bytes,
+   our frame. `0x525` in that ISR is ST's `USART_IT_RXNE`.
+2. **USART2 is initialised receive-only.** `FUN_08024f96` builds a
+   `USART_InitTypeDef` with baud `0x960` = **2400** and
+   **`USART_Mode = 0x0004` = `USART_Mode_Rx`** — `USART_Mode_Tx` (`0x0008`)
+   is never set, so the transmit enable bit is never turned on.
+3. **The only transmit routine targets a different UART.** `FUN_0802741c` is
+   `USART_SendData` (`strh r1,[r0,#4]`); its *only* caller is `FUN_08025324`
+   (a putchar: send, then poll TC `0x40`), and that passes base
+   `0x40013800` = **USART1**, not USART2.
+4. **USART2's base appears as a literal in exactly one place** (`0x08025284`),
+   reachable from only three functions: the RX ISR, the init, and an accessor
+   returning `(base, USART_IT_RXNE)`. There is no fourth path.
+
+**Therefore the DMM mode/range is owned entirely by the measurement chip,
+selected by the front-panel rotary switch wired to it. The STM32 only listens
+and relays. No USB command can change it, and none will ever be found —
+`tools/dmm_setmode_probe.py` was searching for something that does not exist.**
+
+This also offers a plausible (not proven) mechanism for the transient
+artifacts: at 2400 baud a 14-byte frame takes ~58 ms, and the USB read copies
+a buffer the ISR is concurrently refilling, so a badly-timed read returns a
+frame torn across two updates — which is exactly what a "valid-looking but
+wrong mode" sample is.
+
+### Consequences
+- Remote mode-select: **closed, not achievable.** Any UI must ask the user to
+  turn the dial; the app can only *report* the mode it reads.
+- Still open (but unrelated to the DMM): locating image B's vendor command
+  dispatcher, for scope/AWG control coverage.
