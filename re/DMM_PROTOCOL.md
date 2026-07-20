@@ -181,10 +181,12 @@ live `gui/dmm_tab.py`.
 ### Remaining (minor)
 - All front-panel DMM modes are decoded (DC/AC volts inc. mV, DC/AC current inc.
   mA, resistance Ω/kΩ/MΩ, continuity, capacitance, diode), both signs and OL.
-- Capacitance µF range confirmed: byte 11 = 0x01 → µF (nF = 0x00). A 206 µF cap
-  reads **OL** because the device's max capacitance range is 100 µF (per the
-  Hantek 2D72 manual: 40 nF / 400 nF / 4 µF / 40 µF / 100 µF) — correct
-  over-range behaviour, not a fault. An in-range µF value hasn't been captured to
-  double-check the decimal scaling, but the digit/decimals decode is
-  range-independent so it will be correct.
+- Capacitance fully verified: nF (byte 11 = 0x00) and µF (byte 11 = 0x01),
+  in-range values confirmed against the screen (47 µF → 48.52, 10 µF → 11.31).
+  A 206 µF cap reads **OL** because the device's max capacitance range is 100 µF
+  (Hantek 2D72 manual: 40 nF / 400 nF / 4 µF / 40 µF / 100 µF) — correct
+  over-range behaviour, not a fault.
 - Sign confirmed with a genuine negative reading (DC -1.997 V).
+
+**All DMM modes and ranges are now decoded and verified against the device
+screen.** Nothing outstanding.

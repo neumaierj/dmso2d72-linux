@@ -231,6 +231,17 @@ def test_decode_dmm_capacitance_uf_overrange():
     assert r.formatted() == "OL µF"
 
 
+@pytest.mark.parametrize("hexframe,value", [
+    ("550b010700000204080502010355", 48.52),   # 47 µF cap, screen 48.53 µF
+    ("550b010700000201010301010355", 11.31),   # 10 µF cap, screen 11.31 µF
+])
+def test_decode_dmm_capacitance_uf_in_range(hexframe, value):
+    r = p.decode_dmm(bytes.fromhex(hexframe))
+    assert r.mode == "Capacitance"
+    assert r.unit == "µF"
+    assert r.value == pytest.approx(value)
+
+
 def test_decode_dmm_sign():
     # byte 5 = 1 marks a negative reading
     frame = bytearray.fromhex("550b010a01000301040909050155")
