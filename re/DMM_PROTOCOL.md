@@ -190,3 +190,67 @@ live `gui/dmm_tab.py`.
 
 **All DMM modes and ranges are now decoded and verified against the device
 screen.** Nothing outstanding.
+
+## Remote mode selection (func=0x0001) — attempted, NO usable result
+
+Goal: find a USB command that changes the DMM mode/range remotely (today only
+the front-panel dial/buttons can). Tool: `tools/dmm_setmode_probe.py`, which
+reads the status frame, sends a candidate `func=0x0001` command (the one
+small func value unused by scope/AWG/screen), re-reads, and reports whether
+`(byte4, byte11, byte12)` changed. Logged to `re/dmm_log.jsonl`
+(`session: "setmode"`, `"setmode-artifact"`).
+
+**Outcome: no command was shown to set the DMM mode.** The sweep appeared to
+find several, but follow-up testing showed those "hits" were measurement
+artifacts. Recorded here so the next attempt doesn't repeat the mistake.
+
+### Why the sweep's hits were not real
+
+The sweep reported 7 mode changes (`cmd=0x00 val0=6`, `cmd=0x01 val0=7`,
+`cmd=0x03 val0=7`, `cmd=0x0a val0=2/3/7/10`). Three checks invalidate them:
+
+1. **The probe cannot attribute a change to a command.** It compares a read
+   taken 0.2 s before a write with one 0.2 s after. Replaying the log,
+   **76 of 187 rows have `before` ≠ the previous row's `after`** — the state
+   moved *between* probes, with no command in between. The before/after
+   window is far too narrow to isolate cause, so a `changed=True` is just as
+   likely to be catching ambient movement as a command's effect.
+2. **The state is not stable while writes are in flight, and reverts.**
+   Sending `cmd=0x0a val0=3` at the sweep's 0.2 s cadence, 20 consecutive
+   reads gave Capacitance 19× / Diode 1×; stopping the writes and waiting
+   3 s returned it to Diode 9×/10. A single write followed by a 6 s poll
+   showed Capacitance for exactly **one** read at +1.1 s, then Diode for the
+   rest. So the apparent mode "change" does not persist.
+3. **The same command with a real settle time does nothing.** `cmd=0x0a
+   val0=3` sent 4× with 2 s between reads: no change, all four Diode.
+
+Meanwhile the frame is genuinely rock-stable at rest — 30 reads over 7.5 s
+with zero writes were byte-identical — so this is not general read noise or
+someone touching the dial. It is specifically writes to `func=0x0001` that
+perturb what the status read returns, transiently.
+
+### What that means
+
+Two explanations remain, and **they cannot be told apart from the USB side
+alone**:
+
+- the write briefly changes real internal state, but firmware re-asserts the
+  mode from the physical rotary switch (which never moved), so it snaps back;
+- the write perturbs the status *reporting* path, and the odd frames are
+  stale/alternate sub-frames rather than a real mode change.
+
+Under either one, `func=0x0001` is **not a usable remote mode-select**: the
+state does not persist, so there is nothing to build on. This also fits the
+long-standing open question above — the Windows app may only control
+mode/range in ways tied to the physical switch.
+
+### If picking this up again
+
+- **Watch the physical screen.** Every conclusion here is from the status
+  frame alone, which is exactly what made the false positives possible. The
+  device's own LCD is the ground truth, as in `dmm_decode_session.py`.
+- **Never trust a single before/after read.** `try_command` now re-reads
+  after 1.0 s and only reports a change that is still present (see below);
+  a change that vanishes is an artifact, not a result.
+- The remaining honest lead is firmware analysis (interactive Ghidra, per the
+  section above), not further blind sweeps of this function.
