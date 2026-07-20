@@ -233,18 +233,20 @@ perturb what the status read returns, transiently.
 
 ### What that means
 
-Two explanations remain, and **they cannot be told apart from the USB side
-alone**:
+Explanations, which **cannot be told apart from the USB side alone**:
 
-- the write briefly changes real internal state, but firmware re-asserts the
-  mode from the physical rotary switch (which never moved), so it snaps back;
+- the write changes real internal state but the firmware re-asserts the mode
+  from the soft-key menu selection, so it snaps back;
 - the write perturbs the status *reporting* path, and the odd frames are
-  stale/alternate sub-frames rather than a real mode change.
+  stale, torn or substituted frames rather than a real mode change.
 
-Under either one, `func=0x0001` is **not a usable remote mode-select**: the
-state does not persist, so there is nothing to build on. This also fits the
-long-standing open question above — the Windows app may only control
-mode/range in ways tied to the physical switch.
+⚠️ **Update 2026-07-21:** the device owner watched the screen during a run and
+**the device did change modes**, while the bottom-line mode indicator did not
+follow. So "nothing really changed" is wrong — something real happens, and the
+device is left inconsistent. What is undetermined is whether the *measurement*
+changes or only the *reported* mode. The conclusion below ("not a usable
+remote mode-select") stands only in the narrow sense that nothing persists
+predictably enough to build on yet — not as evidence that no path exists.
 
 ### If picking this up again
 
@@ -339,15 +341,66 @@ Read image B's vector table at `0x08005000` (index = 16 + IRQ number) to find
 application ISRs. **The vendor command dispatcher is still not located, but it
 is in image B, not image A.**
 
-## SOLVED: remote mode-select is IMPOSSIBLE — the DMM link is one-way
+## ~~SOLVED: remote mode-select is IMPOSSIBLE~~ — RETRACTED 2026-07-21
 
-Found while looking for the EP2-OUT consumer, and it settles the question the
-`func=0x0001` probing could not.
+**This conclusion was wrong and is withdrawn.** Two errors:
 
-**The DMM is a separate measurement chip that streams to the STM32 over
-USART2, and the STM32 never talks back.**
+1. **"Selected by the front-panel rotary switch" was fabricated.** The device
+   has **no rotary switch**. The mode is chosen from an on-screen soft-key
+   menu on the bottom line of the display — pages of modes selected with the
+   **F1–F4** buttons. This was never verified against the hardware; it was
+   assumed from how handheld DMMs usually work and then stated as fact.
+2. **"No USB command can change the mode" is contradicted by observation.**
+   During the `dmm_setmode_probe.py` run the device owner watched the screen
+   and **the device did switch modes** — while the bottom-line mode indicator
+   did *not* update, leaving the device in an inconsistent state.
 
-Evidence, all from image B:
+The logic error: USART2 being receive-only shows the STM32 does not command
+the DMM chip *over USART2*. I leapt from there to "nothing can change the
+mode", which only follows if the chip is the sole owner of the mode — and
+that is exactly what the soft-key menu disproves. Since F1–F4 change the
+mode, the STM32 necessarily has a control path.
+
+### What survives, and what it means
+
+Still solid (verified several ways, unchanged):
+
+- The 14-byte frame arrives on **USART2 at 2400 baud** (`USART_Mode = 0x0004`,
+  Rx only; the sole `USART_SendData` caller targets USART1). ISR
+  `FUN_08024d5c` fills a buffer at `0x2000d46c`, raising a frame-ready flag at
+  `0x2000d555` once the index passes `0xd`.
+
+New evidence that explains the inconsistent state — **there are two separate
+pieces of mode state**:
+
+- **The STM32 keeps its own 14-byte frame** at `0x200048fc` and copies it
+  *over* the UART receive buffer:
+  `FUN_0800cd7c(dst=0x2000d46c, src=0x200048fc, 0xe)` in `FUN_0802341a`,
+  guarded by a key-edge condition. So the frame the USB reply exposes is **not
+  necessarily what the measurement chip sent** — the firmware can substitute
+  its own.
+- **The menu state is separate.** `FUN_08022a28` (next to the mode-label
+  strings at `0x08022f08`) renders the soft-key bar from a page number
+  (`FUN_08023000` → 1/2/3) and a selection index at `DAT_0802329c + 0x19`,
+  compared against 0/1, 3/4, 6/7, 9/10 — three items per page across three
+  pages, matching the F1–F4 paged menu.
+
+Two independent states, one feeding the USB frame and one driving the bottom
+line, is a straightforward explanation for a write that changes the reported
+mode while the menu label stays put.
+
+### Open — do not assume either way
+
+**Whether the DMM mode can be set remotely is once again an open question**,
+and the `func=0x0001` hits should be re-examined rather than dismissed. What
+is still unknown: whether a probe write changed the *real* measurement mode
+(implying a control path to the chip, most plausibly GPIO, since it is not
+USART2) or only the STM32's substituted frame and hence just the *reported*
+mode. Distinguishing them needs someone at the device checking whether the
+readings themselves become physically correct for the new mode — not just
+whether the mode label in the frame changes.
+
+### Supporting detail for the USART2 findings (image B)
 
 1. **The 14-byte frame arrives on USART2.** The ISR `FUN_08024d5c`
    (vector `0x080050d8`) reads `USART_ReceiveData` and appends to a buffer at
@@ -366,19 +419,18 @@ Evidence, all from image B:
    reachable from only three functions: the RX ISR, the init, and an accessor
    returning `(base, USART_IT_RXNE)`. There is no fourth path.
 
-**Therefore the DMM mode/range is owned entirely by the measurement chip,
-selected by the front-panel rotary switch wired to it. The STM32 only listens
-and relays. No USB command can change it, and none will ever be found —
-`tools/dmm_setmode_probe.py` was searching for something that does not exist.**
+These establish only that the STM32 does not command the measurement chip
+**over USART2**. They say nothing about GPIO or other paths, and they do not
+constrain the STM32's own substituted frame at `0x200048fc`.
 
-This also offers a plausible (not proven) mechanism for the transient
-artifacts: at 2400 baud a 14-byte frame takes ~58 ms, and the USB read copies
-a buffer the ISR is concurrently refilling, so a badly-timed read returns a
-frame torn across two updates — which is exactly what a "valid-looking but
-wrong mode" sample is.
+Also note the ~58 ms frame time at 2400 baud: the USB read copies a buffer the
+ISR concurrently refills, so a badly-timed read can return a frame torn across
+two updates. That remains a plausible contributor to the earlier transients,
+but it is **not** an explanation for a real mode change on the device.
 
 ### Consequences
-- Remote mode-select: **closed, not achievable.** Any UI must ask the user to
-  turn the dial; the app can only *report* the mode it reads.
-- Still open (but unrelated to the DMM): locating image B's vendor command
-  dispatcher, for scope/AWG control coverage.
+- Remote mode-select: **open**. The app currently only *reports* mode; do not
+  document it as impossible, and do not build UI asserting the user must
+  change it by hand until the question above is settled.
+- Still open (and likely related): locating image B's vendor command
+  dispatcher, which is what `func=0x0001` writes are reaching.

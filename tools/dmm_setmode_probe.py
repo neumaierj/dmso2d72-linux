@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Closed-loop probe for a USB command that switches the DMM measurement mode.
 
-*** SUPERSEDED -- there is no such command. Firmware analysis showed the DMM is
-a separate chip that streams to the STM32 over USART2, which is initialised
-receive-only (USART_Mode_Rx, no Tx), and the only USART_SendData caller targets
-USART1. The mode is owned by the chip and selected by the front-panel rotary
-switch; the STM32 cannot change it. Kept for the record only -- see
-re/DMM_PROTOCOL.md "remote mode-select is IMPOSSIBLE". ***
+NOTE: a previous "superseded -- no such command exists" note here was wrong and
+has been removed. The device owner watched the screen during a run of this tool
+and the device *did* switch modes (though the bottom-line mode indicator did not
+follow, leaving it inconsistent). Whether a write changes the real measurement
+mode or only the mode the frame reports is still undetermined -- see
+re/DMM_PROTOCOL.md. Judge results by the readings, not the reported mode.
 
 The device's mode (DC/AC volts, current, resistance, ...) is normally chosen with
 the front-panel buttons. This tool looks for a USB command that changes it: for
