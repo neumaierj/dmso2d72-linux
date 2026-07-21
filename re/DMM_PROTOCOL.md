@@ -663,6 +663,27 @@ selected mode. `gui/dmm_tab.py` therefore shows the device's page/slot layout
 and highlights the app-selected mode itself; the note there and in the README
 tells the user not to trust the device's on-screen bar after a remote switch.
 
+### Read direction: the app CAN follow the device (2026-07-21)
+
+The reverse — the app reflecting the device's real mode — *is* possible, and is
+implemented. A correlation experiment (poll every readable frame while pressing
+the physical F-keys) established:
+
+- **`func=0x0103` config frames are fully static** — byte-identical across page
+  and mode changes; they expose nothing about the menu.
+- **The page (`+0x17`) is invisible over USB** — pressing F4 (page only, no mode
+  change) moves no readable byte.
+- **The mode is visible in the status frame (`func=0x0101`)**, and mode + range
+  (byte 11) pin down the exact soft-key uniquely (DC Voltage+V = "DC V",
+  +mV = "DC mV", Resistance = "OHM", etc. — all 11 map 1:1).
+
+So `gui/dmm_tab.py` maps each live reading to its soft-key (`_slot_for_reading`)
+and moves the panel highlight (and page) to it, debounced against torn
+mid-switch frames. The app panel therefore follows the device's real mode
+whether it was changed from the app or with the physical F1–F4 keys — verified
+on hardware. Only the *write* direction (driving the device's own bar) remains
+impossible.
+
 ### Supporting detail for the USART2 findings (image B)
 
 1. **The 14-byte frame arrives on USART2.** The ISR `FUN_08024d5c`

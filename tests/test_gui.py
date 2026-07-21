@@ -129,7 +129,7 @@ def test_select_sends_the_command_and_marks_it(qapp):
     tab.set_device(fake)
     _click_mode(tab, "DC V")
     assert ("set_dmm_mode", ("DC V",)) in fake.calls
-    assert tab._sent_mode == "DC V"
+    assert tab._active_mode == "DC V"
 
 
 def test_current_mode_asks_first_and_cancel_sends_nothing(qapp, monkeypatch):
@@ -139,7 +139,7 @@ def test_current_mode_asks_first_and_cancel_sends_nothing(qapp, monkeypatch):
     monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Cancel)
     _click_mode(tab, "DC A")
     assert "set_dmm_mode" not in fake.method_names()
-    assert tab._sent_mode is None
+    assert tab._active_mode is None
 
 
 def test_current_mode_proceeds_when_confirmed(qapp, monkeypatch):
@@ -412,3 +412,74 @@ def test_hold_freezes_the_display(qapp):
     tab.hold_button.setChecked(True)
     tab._show_reading(_reading("550b010a01000303000000050155"))  # 3.000 V
     assert tab.value_label.text() == shown
+
+
+# ------------------------------------------- panel follows the device's mode
+
+
+def test_slot_for_reading_maps_every_mode(qapp):
+    from dmso2d72.gui.dmm_tab import _slot_for_reading
+
+    cases = {
+        "550b010a01000300000000050155": "DC V",
+        "550b010a01000300000000020155": "DC mV",
+        "550b010a02000300000000050155": "AC V",
+        "550b010a01000300000000050055": "DC A",
+        "550b010a01000300000000020055": "DC mA",
+        "550b010a02000300000000050055": "AC A",
+        "550b010a02000300000000020055": "AC mA",
+        "550b010800000300090903030255": "Resistance",
+        "550b010900000100000000050255": "Continuity",
+        "550b010a00000300000000000355": "Capacitance",
+        "550b010a00000300050909050155": "Diode",
+    }
+    for frame, expected in cases.items():
+        assert _slot_for_reading(_reading(frame)) == expected
+
+
+def test_panel_follows_the_device_after_two_readings(qapp):
+    tab = DmmTab()
+    tab.set_device(FakeDevice())
+    r = _reading("550b010800000300090903030255")  # Resistance
+    tab._show_reading(r)
+    assert tab._active_mode is None  # one reading is not enough (debounce)
+    tab._show_reading(r)
+    assert tab._active_mode == "Resistance"
+    from dmso2d72.gui.dmm_tab import _page_of
+
+    assert tab._page == _page_of("Resistance")
+
+
+def test_single_torn_frame_does_not_move_the_highlight(qapp):
+    """A mid-switch frame decoding as another mode must not flip the panel."""
+    tab = DmmTab()
+    tab.set_device(FakeDevice())
+    dcv = _reading("550b010a01000300000000050155")  # DC V, stable
+    for _ in range(2):
+        tab._show_reading(dcv)
+    assert tab._active_mode == "DC V"
+    tab._show_reading(_reading("550b010a00000300000000000355"))  # one Capacitance blip
+    tab._show_reading(dcv)
+    assert tab._active_mode == "DC V"  # the blip never took hold
+
+
+def test_app_set_is_not_bounced_by_stale_old_mode_frames(qapp):
+    """After the app sets a mode, in-flight old-mode frames must not flicker it."""
+    tab = DmmTab()
+    tab.set_device(FakeDevice())
+    # Start settled in Resistance.
+    res = _reading("550b010800000300090903030255")
+    for _ in range(2):
+        tab._show_reading(res)
+    assert tab._active_mode == "Resistance"
+    # App commands DC V; device still streaming Resistance for a moment.
+    tab._set_mode("DC V")
+    assert tab._active_mode == "DC V"
+    for _ in range(3):
+        tab._show_reading(res)  # stale old-mode frames
+    assert tab._active_mode == "DC V"  # held, not bounced back
+    # Once the device confirms DC V, follow resumes normally.
+    dcv = _reading("550b010a01000300000000050155")
+    for _ in range(2):
+        tab._show_reading(dcv)
+    assert tab._active_mode == "DC V"

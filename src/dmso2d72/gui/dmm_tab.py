@@ -56,6 +56,31 @@ def _page_of(mode: str) -> int:
     return 0
 
 
+def _slot_for_reading(reading) -> str | None:
+    """The soft-key a live reading corresponds to, from its mode and range.
+
+    The device does not report which soft-key is highlighted, but a reading's
+    decoded mode plus its unit prefix pin it down uniquely — so the panel can
+    follow the device's real mode even when it is changed with the physical
+    keys, not just from the app. Returns a PAGES mode key, or None if unmapped.
+    """
+    mode, unit = reading.mode, reading.unit
+    if mode == "DC Voltage":
+        return "DC mV" if unit == "mV" else "DC V"
+    if mode == "AC Voltage":
+        return "AC V"
+    if mode == "DC Current":
+        return "DC mA" if unit == "mA" else "DC A"
+    if mode == "AC Current":
+        return "AC mA" if unit == "mA" else "AC A"
+    return {
+        "Resistance": "Resistance",
+        "Continuity": "Continuity",
+        "Capacitance": "Capacitance",
+        "Diode": "Diode",
+    }.get(mode)
+
+
 class DmmTab(DeviceTab):
     device_screen = p.SCREEN_DMM
     reading_taken = Signal(object)
@@ -64,8 +89,18 @@ class DmmTab(DeviceTab):
         super().__init__(parent)
         self.worker: DmmWorker | None = None
         self.stats = DmmStats()
-        self._sent_mode: str | None = None
+        self._active_mode: str | None = None
         self._page = 0
+        # Debounce for following the device's live mode: a mid-switch frame can
+        # briefly decode as another mode, so a new mode must persist before the
+        # panel follows it.
+        self._pending_slot: str | None = None
+        self._pending_count = 0
+        # After the app commands a mode, ignore readings until the device
+        # confirms it, so stale in-flight frames of the old mode do not flicker
+        # the highlight. Bounded, so a mode the device never reaches recovers.
+        self._expecting: str | None = None
+        self._expecting_left = 0
 
         self.value_label = QLabel("--")
         self.value_label.setAlignment(Qt.AlignCenter)
@@ -166,10 +201,11 @@ class DmmTab(DeviceTab):
         read_form.addRow(self.switch_button)
 
         self.hint_label = QLabel(
-            "These keys mirror the device's own soft-key pages. Selecting a mode "
-            "takes effect immediately, but the device's on-screen bar keeps "
-            "highlighting its previous entry — trust this panel and the readout, "
-            "not the bar on the device."
+            "These keys mirror the device's own soft-key pages, and follow the "
+            "live reading — so pressing F1–F4 on the device highlights the mode "
+            "here too. The device's own on-screen bar, however, keeps "
+            "highlighting its previous entry, so trust this panel and the "
+            "readout rather than the bar on the device."
         )
         self.hint_label.setWordWrap(True)
 
@@ -204,7 +240,7 @@ class DmmTab(DeviceTab):
             label, mode = entry
             button.setText(label)
             button.setEnabled(self.device is not None)
-            button.setChecked(mode == self._sent_mode)
+            button.setChecked(mode == self._active_mode)
 
     def _next_page(self):
         self._page = (self._page + 1) % len(PAGES)
@@ -240,17 +276,24 @@ class DmmTab(DeviceTab):
         if not self._apply(lambda d: d.set_dmm_mode(mode)):
             self._refresh_panel()
             return
-        self._sent_mode = mode
+        self._active_mode = mode
+        # Wait for the device to reach this mode before live-follow resumes, so
+        # in-flight old-mode frames do not bounce the highlight back.
+        self._expecting = mode
+        self._expecting_left = 30
+        self._pending_slot = None
+        self._pending_count = 0
         # A new mode means new units; keeping old extremes or history would mix
         # volts and ohms on one axis.
         self._reset_stats()
         self.history.clear()
+        self._page = _page_of(mode)
         self._refresh_panel()
 
     def focus_mode_selector(self):
         """Bring the app's selected mode into view and focus its key."""
-        if self._sent_mode is not None:
-            self._page = _page_of(self._sent_mode)
+        if self._active_mode is not None:
+            self._page = _page_of(self._active_mode)
             self._refresh_panel()
         self.slot_buttons[0].setFocus()
 
@@ -300,6 +343,7 @@ class DmmTab(DeviceTab):
             self.value_label.setText("—")
             self.mode_label.setText("device is not on the multimeter screen")
             return
+        self._follow_device_mode(reading)
         self.value_label.setText(reading.formatted())
         self.mode_label.setText(reading.mode)
         self.stats.update(reading)
@@ -308,6 +352,39 @@ class DmmTab(DeviceTab):
         self.count_label.setText(str(self.stats.count))
         self.history.add(reading)
         self.reading_taken.emit(reading)
+
+    def _follow_device_mode(self, reading):
+        """Move the panel highlight to the device's real mode, from the reading.
+
+        Follows a change whether the app or the physical keys caused it. A new
+        mode must persist for two readings before we act, so a torn mid-switch
+        frame does not make the highlight flicker. Because a mode change means
+        new units, the stats and history reset with it.
+        """
+        slot = _slot_for_reading(reading)
+        if self._expecting is not None:
+            self._expecting_left -= 1
+            if slot == self._expecting or self._expecting_left <= 0:
+                self._expecting = None
+            return
+        if slot is None or slot == self._active_mode:
+            self._pending_slot = None
+            self._pending_count = 0
+            return
+        if slot == self._pending_slot:
+            self._pending_count += 1
+        else:
+            self._pending_slot = slot
+            self._pending_count = 1
+        if self._pending_count < 2:
+            return
+        self._active_mode = slot
+        self._pending_slot = None
+        self._pending_count = 0
+        self._reset_stats()
+        self.history.clear()
+        self._page = _page_of(slot)
+        self._refresh_panel()
 
     # ----------------------------------------------------------- device state
 
@@ -321,7 +398,7 @@ class DmmTab(DeviceTab):
         # The device's actual mode is unknown until we read it, and we do not
         # push one on connect (a current range would be a low-impedance hazard),
         # so nothing is marked as selected until the user picks a mode.
-        self._sent_mode = None
+        self._active_mode = None
         self._refresh_panel()
 
     def _set_enabled(self, on: bool):
@@ -346,7 +423,7 @@ class DmmTab(DeviceTab):
         # Deliberately no mode is pushed on connect: silently restoring a current
         # range would put a low-impedance input on the probes without the user
         # asking. Nothing is marked selected until the user picks a mode.
-        self._sent_mode = None
+        self._active_mode = None
         self._refresh_panel()
 
     def shutdown(self):
