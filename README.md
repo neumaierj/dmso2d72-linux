@@ -12,12 +12,29 @@ Linux GUI.
   mode, level), run/stop, single or continuous capture, CSV export.
 - **Signal generator**: waveform type (sine, square, ramp, trapezoid, arb
   slots), frequency, amplitude, offset, duty cycles, output start/stop.
-- **Multimeter**: live readings over USB. The DMM protocol was reverse-
-  engineered for this project by probing the device and correlating the data
-  stream with known inputs (see [re/DMM_PROTOCOL.md](re/DMM_PROTOCOL.md)).
-  **All front-panel modes are decoded**: DC/AC volts (V, mV), DC/AC current
+- **Multimeter**: live readings over USB, **remote mode selection**, min/max,
+  hold, a rolling history plot and CSV logging. The DMM protocol was reverse-
+  engineered for this project — first by probing the device, then from the
+  firmware itself (see [re/DMM_PROTOCOL.md](re/DMM_PROTOCOL.md)).
+  **All modes are decoded and settable**: DC/AC volts (V, mV), DC/AC current
   (A, mA), resistance (Ω/kΩ/MΩ), continuity, capacitance and diode test —
   with sign, auto-ranging and over-range "OL".
+- **Selectable dark/light theme** (View ▸ Theme, or follow the system), and
+  window/instrument settings persist between sessions.
+- Menu bar with keyboard shortcuts; settings are re-sent to the device on
+  connect so the app and the instrument cannot silently disagree.
+
+### Multimeter mode selection — two things to know
+
+Setting the mode from the app changes the measurement immediately, but the
+device's own soft-key bar keeps highlighting the previously selected entry.
+That is a firmware quirk, not a bug here: **trust the app's readout, not the
+bottom line on the device.**
+
+⚠️ The four current ranges (`AC A`, `DC A`, `AC mA`, `DC mA`) make the input a
+**low-impedance shunt**, which must be wired in series with the load — putting
+it across a voltage source shorts that source. Selecting one of these from the
+app therefore asks for confirmation first.
 
 ## Installation
 
@@ -60,6 +77,15 @@ too (scope/AWG features permitting), but only the DMSO2D72 has been targeted.
 - [ ] AWG: 1 kHz sine on the generator output, visible on CH1
 - [ ] CSV export contains plausible sample values
 - [ ] Multimeter: DC-volts reading matches the device screen (Start reading)
+- [ ] Multimeter: each of the 11 modes can be selected from the app and the
+      reading changes accordingly (the device's soft-key highlight will lag —
+      see above)
+- [ ] Multimeter: choosing a current range asks for confirmation, and
+      cancelling really leaves the previous mode in place
+- [ ] Multimeter: min/max track a changing input; Hold freezes the display
+- [ ] Theme switch (View ▸ Theme) recolours the live trace legibly both ways
+- [ ] Unplugging mid-capture reports the loss once, without crashing, and
+      settings are re-applied on reconnect
 
 ## Vertical units
 
@@ -71,12 +97,17 @@ volts. Raw sample bytes and division values are both included in CSV exports.
 
 ```sh
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                       # protocol unit tests, no hardware needed
+.venv/bin/pytest                       # protocol + GUI tests, no hardware needed
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m dmso2d72.app --smoke-test
 ```
 
-Protocol framing lives in `src/dmso2d72/protocol.py`, USB I/O in
-`src/dmso2d72/device.py`, GUI in `src/dmso2d72/gui/`.
+The GUI tests run headless and stub out the device, so they neither need
+hardware nor disturb an attached one.
+
+Protocol framing lives in `src/dmso2d72/protocol.py` and USB I/O in
+`src/dmso2d72/device.py`; neither imports Qt. The GUI is in
+`src/dmso2d72/gui/`, where the tabs share `device_tab.py` for connect/disconnect
+plumbing and `theme.py` owns every colour that the Qt palette does not reach.
 
 ## Credits
 

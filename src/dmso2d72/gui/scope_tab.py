@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -22,9 +23,8 @@ import pyqtgraph as pg
 
 from .. import protocol as p
 from ..capture import CaptureWorker
-from ..device import DeviceError, Dmso2d72
-
-CHANNEL_COLORS = {1: "#f4d03f", 2: "#5dade2"}
+from ..device import Dmso2d72
+from .device_tab import DeviceTab, _set_checked, _set_index, _set_text, _set_value
 
 
 class ChannelBox(QGroupBox):
@@ -33,6 +33,11 @@ class ChannelBox(QGroupBox):
     def __init__(self, channel: int):
         super().__init__(f"Channel {channel}")
         self.channel = channel
+
+        # Filled in by apply_theme so the box matches its curve.
+        self.swatch = QLabel()
+        self.swatch.setFixedSize(28, 12)
+        self.swatch.setToolTip("Colour of this channel's trace")
 
         self.enabled = QCheckBox("Enabled")
         self.enabled.setChecked(channel == 1)
@@ -50,8 +55,13 @@ class ChannelBox(QGroupBox):
         self.offset.setToolTip("Vertical offset, raw device units (100 = center)")
         self.bw_limit = QCheckBox("20 MHz bandwidth limit")
 
+        header = QHBoxLayout()
+        header.addWidget(self.enabled)
+        header.addStretch()
+        header.addWidget(self.swatch)
+
         form = QFormLayout(self)
-        form.addRow(self.enabled)
+        form.addRow(header)
         form.addRow("Coupling", self.coupling)
         form.addRow("Probe", self.probe)
         form.addRow("Volts/div", self.scale)
@@ -59,23 +69,17 @@ class ChannelBox(QGroupBox):
         form.addRow(self.bw_limit)
 
 
-class ScopeTab(QWidget):
-    device_lost = Signal(str)
-
+class ScopeTab(DeviceTab):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.device: Dmso2d72 | None = None
         self.worker: CaptureWorker | None = None
         self.last_data: dict[int, list[int]] = {}
 
-        self.plot = pg.PlotWidget(background="#101418")
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        self.plot = pg.PlotWidget()
         self.plot.setYRange(-4, 4, padding=0)
         self.plot.setLabel("left", "divisions")
         self.plot.setLabel("bottom", "sample")
-        self.curves = {
-            ch: self.plot.plot(pen=pg.mkPen(color, width=2)) for ch, color in CHANNEL_COLORS.items()
-        }
+        self.curves = {ch: self.plot.plot() for ch in (1, 2)}
 
         self.ch_boxes = {1: ChannelBox(1), 2: ChannelBox(2)}
 
@@ -137,7 +141,7 @@ class ScopeTab(QWidget):
         layout.addWidget(self.controls_widget)
 
         self._wire_controls()
-        self.set_device(None)
+        self._set_enabled(False)
 
     # ------------------------------------------------------------------ wiring
 
@@ -183,25 +187,95 @@ class ScopeTab(QWidget):
         self.single_button.clicked.connect(self._single_capture)
         self.export_button.clicked.connect(self._export_csv)
 
-    def _apply(self, fn):
-        if self.device is None:
-            return
-        try:
-            fn(self.device)
-        except DeviceError as e:
-            self.device_lost.emit(str(e))
-
     def enabled_channels(self) -> list[int]:
         return [ch for ch, box in self.ch_boxes.items() if box.enabled.isChecked()]
 
     # ------------------------------------------------------------- device state
 
-    def set_device(self, device: Dmso2d72 | None):
-        self._stop_worker()
-        self.device = device
-        self.controls_widget.setEnabled(device is not None)
+    def _on_device_changed(self, device: Dmso2d72 | None):
         if device is None:
             self.live_button.setChecked(False)
+
+    def push_settings(self):
+        """Send every scope setting once, in dependency order.
+
+        Explicit calls rather than re-emitting widget signals: a signal replay
+        would run the same lambdas Qt already connected and write each setting
+        twice. Aborts on the first failure so a device that went away produces
+        one device_lost, not one per setting.
+        """
+        steps = []
+        for ch, box in self.ch_boxes.items():
+            steps += [
+                lambda d, c=ch, b=box: d.set_channel_enabled(c, b.enabled.isChecked()),
+                lambda d, c=ch, b=box: d.set_coupling(c, b.coupling.currentText()),
+                lambda d, c=ch, b=box: d.set_probe(c, b.probe.currentText()),
+                lambda d, c=ch, b=box: d.set_volt_scale(c, b.scale.currentText()),
+                lambda d, c=ch, b=box: d.set_channel_offset(c, b.offset.value()),
+                lambda d, c=ch, b=box: d.set_bandwidth_limit(c, b.bw_limit.isChecked()),
+            ]
+        steps += [
+            lambda d: d.set_time_scale(self.time_scale.currentText()),
+            lambda d: d.set_trigger_source(self.trig_source.currentIndex() + 1),
+            lambda d: d.set_trigger_slope(self.trig_slope.currentText()),
+            lambda d: d.set_trigger_mode(self.trig_mode.currentText()),
+            lambda d: d.set_trigger_level(self.trig_level.value()),
+            # Last, so the scope only starts once it is fully configured. This
+            # is also what finally tells the device about run_button's initial
+            # state, which no signal ever carried.
+            lambda d: d.scope_start(self.run_button.isChecked()),
+        ]
+        for step in steps:
+            if not self._apply(step):
+                return
+
+    def apply_theme(self, theme):
+        self.plot.setBackground(theme.plot_background)
+        for edge in ("left", "bottom"):
+            axis = self.plot.getAxis(edge)
+            axis.setPen(theme.axis)
+            axis.setTextPen(theme.axis)
+        self.plot.showGrid(x=True, y=True, alpha=theme.grid_alpha)
+        for ch, curve in self.curves.items():
+            curve.setPen(pg.mkPen(theme.channel_colors[ch], width=2))
+            self.ch_boxes[ch].swatch.setStyleSheet(
+                f"background-color: {theme.channel_colors[ch]}; border: 1px solid {theme.axis};"
+            )
+
+    def save_settings(self, settings):
+        for ch, box in self.ch_boxes.items():
+            settings.setValue(f"scope/ch{ch}/enabled", box.enabled.isChecked())
+            settings.setValue(f"scope/ch{ch}/coupling", box.coupling.currentText())
+            settings.setValue(f"scope/ch{ch}/probe", box.probe.currentText())
+            settings.setValue(f"scope/ch{ch}/scale", box.scale.currentText())
+            settings.setValue(f"scope/ch{ch}/offset", box.offset.value())
+            settings.setValue(f"scope/ch{ch}/bw_limit", box.bw_limit.isChecked())
+        settings.setValue("scope/time_scale", self.time_scale.currentText())
+        settings.setValue("scope/trig_source", self.trig_source.currentIndex())
+        settings.setValue("scope/trig_slope", self.trig_slope.currentText())
+        settings.setValue("scope/trig_mode", self.trig_mode.currentText())
+        settings.setValue("scope/trig_level", self.trig_level.value())
+        settings.setValue("scope/samples", self.samples.value())
+        settings.setValue("scope/running", self.run_button.isChecked())
+
+    def restore_settings(self, settings):
+        from .. import settings as st
+
+        for ch, box in self.ch_boxes.items():
+            _set_checked(box.enabled, st.get_bool(settings, f"scope/ch{ch}/enabled", ch == 1))
+            _set_text(box.coupling, st.get_str(settings, f"scope/ch{ch}/coupling", "DC"))
+            _set_text(box.probe, st.get_str(settings, f"scope/ch{ch}/probe", "x1"))
+            _set_text(box.scale, st.get_str(settings, f"scope/ch{ch}/scale", "1V"))
+            _set_value(box.offset, st.get_int(settings, f"scope/ch{ch}/offset", 100))
+            _set_checked(box.bw_limit, st.get_bool(settings, f"scope/ch{ch}/bw_limit", False))
+        _set_text(self.time_scale, st.get_str(settings, "scope/time_scale", "1ms"))
+        _set_index(self.trig_source, st.get_int(settings, "scope/trig_source", 0))
+        _set_text(self.trig_slope, st.get_str(settings, "scope/trig_slope", "Rising"))
+        _set_text(self.trig_mode, st.get_str(settings, "scope/trig_mode", "Auto"))
+        _set_value(self.trig_level, st.get_int(settings, "scope/trig_level", 100))
+        _set_value(self.samples, st.get_int(settings, "scope/samples", 1000))
+        _set_checked(self.run_button, st.get_bool(settings, "scope/running", True))
+        self.run_button.setText("Stop scope" if self.run_button.isChecked() else "Start scope")
 
     def shutdown(self):
         self._stop_worker()
