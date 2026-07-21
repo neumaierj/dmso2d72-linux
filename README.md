@@ -26,10 +26,16 @@ Linux GUI.
 
 ### Multimeter mode selection — two things to know
 
-Setting the mode from the app changes the measurement immediately, but the
-device's own soft-key bar keeps highlighting the previously selected entry.
-That is a firmware quirk, not a bug here: **trust the app's readout, not the
-bottom line on the device.**
+The multimeter tab mirrors the device's own soft-key layout: four pages of
+modes (F1/F2/F3), with F4 to page through them. Selecting a mode changes the
+measurement immediately, and the app highlights the selected mode itself.
+
+The device's *own* on-screen soft-key bar, however, keeps highlighting its
+previously selected entry. This is a firmware limitation, not a bug here:
+the menu highlight is driven only by the physical keys and cannot be set over
+USB (confirmed by firmware analysis and on hardware — see
+[re/DMM_PROTOCOL.md](re/DMM_PROTOCOL.md)). **Trust the app's panel and readout,
+not the bar on the device.**
 
 ⚠️ The four current ranges (`AC A`, `DC A`, `AC mA`, `DC mA`) make the input a
 **low-impedance shunt**, which must be wired in series with the load — putting

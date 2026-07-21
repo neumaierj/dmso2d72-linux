@@ -10,7 +10,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -34,28 +33,27 @@ from .dmm_history import DmmHistoryView
 # are confirmed first.
 CURRENT_MODES = ("AC A", "DC A", "AC mA", "DC mA")
 
-# Grouped for the selector rather than alphabetically, so related ranges sit
-# together the way they do on the device.
-MODE_ORDER = (
-    "DC V",
-    "AC V",
-    "DC mV",
-    "DC A",
-    "AC A",
-    "DC mA",
-    "AC mA",
-    "Resistance",
-    "Continuity",
-    "Diode",
-    "Capacitance",
+# The device's own soft-key layout, transcribed from the hardware: four pages,
+# three slots each (F1/F2/F3), F4 cycles pages. Each slot is
+# (button label as shown on the device, protocol.DMM_MODES key) or None for the
+# one empty slot. Selecting a mode here uses the same func=0x0001 command the
+# device's own keys use, but the device's on-screen highlight cannot be driven
+# over USB (firmware limitation, see re/DMM_PROTOCOL.md), so this panel — not
+# the device's bar — reflects what the app selected.
+PAGES = (
+    (("DC V", "DC V"), ("OHM", "Resistance"), ("Buzzer", "Continuity")),
+    (("DC A", "DC A"), ("DC mA", "DC mA"), ("DC mV", "DC mV")),
+    (("AC V", "AC V"), ("AC A", "AC A"), ("AC mA", "AC mA")),
+    (("Diode", "Diode"), ("Cap", "Capacitance"), None),
 )
 
 
-class _NoScrollComboBox(QComboBox):
-    """A combo that ignores the wheel, so scrolling the page cannot arm a mode."""
-
-    def wheelEvent(self, event):
-        event.ignore()
+def _page_of(mode: str) -> int:
+    """The page index (0-3) that holds a given mode key, or 0 if not found."""
+    for i, page in enumerate(PAGES):
+        if any(slot and slot[1] == mode for slot in page):
+            return i
+    return 0
 
 
 class DmmTab(DeviceTab):
@@ -66,6 +64,7 @@ class DmmTab(DeviceTab):
         self.worker: DmmWorker | None = None
         self.stats = DmmStats()
         self._sent_mode: str | None = None
+        self._page = 0
 
         self.value_label = QLabel("--")
         self.value_label.setAlignment(Qt.AlignCenter)
@@ -113,17 +112,39 @@ class DmmTab(DeviceTab):
 
         # ------------------------------------------------------------ controls
 
-        self.mode_combo = _NoScrollComboBox()
-        self.mode_combo.addItems(MODE_ORDER)
-        self.mode_combo.setCurrentText("DC V")
-        self.mode_combo.currentTextChanged.connect(self._update_set_button)
-        self.set_mode_button = QPushButton("Set mode")
-        self.set_mode_button.clicked.connect(self._set_mode)
+        # Soft-key panel mirroring the device: a page indicator + F4 to page,
+        # and three mode keys for the current page. Clicking a key selects that
+        # specific mode immediately (direct select), so any visible mode is one
+        # click away; F4 only changes which three are shown.
+        self.page_label = QLabel()
+        self.page_label.setAlignment(Qt.AlignCenter)
+        self.page_button = QPushButton("F4 ▶")
+        self.page_button.setToolTip("Next page of modes")
+        self.page_button.clicked.connect(self._next_page)
+
+        page_row = QHBoxLayout()
+        page_row.addWidget(self.page_label, stretch=1)
+        page_row.addWidget(self.page_button)
+
+        self.slot_buttons = []
+        slot_row = QHBoxLayout()
+        for slot in range(3):
+            button = QPushButton()
+            button.setCheckable(True)
+            # The selected mode gets the theme's highlight colour, so which mode
+            # is active reads at a glance in either theme.
+            button.setStyleSheet(
+                "QPushButton:checked { background-color: palette(highlight);"
+                " color: palette(highlighted-text); font-weight: bold; }"
+            )
+            button.clicked.connect(lambda _=False, s=slot: self._select_slot(s))
+            self.slot_buttons.append(button)
+            slot_row.addWidget(button)
 
         mode_box = QGroupBox("Measurement mode")
-        mode_form = QFormLayout(mode_box)
-        mode_form.addRow(self.mode_combo)
-        mode_form.addRow(self.set_mode_button)
+        mode_layout = QVBoxLayout(mode_box)
+        mode_layout.addLayout(page_row)
+        mode_layout.addLayout(slot_row)
 
         self.start_button = QPushButton("Start reading")
         self.start_button.setCheckable(True)
@@ -144,9 +165,10 @@ class DmmTab(DeviceTab):
         read_form.addRow(self.switch_button)
 
         self.hint_label = QLabel(
-            "Changing the mode from here takes effect immediately, but the "
-            "device's own soft-key bar keeps highlighting the previous entry — "
-            "trust this readout, not the bottom line on the device."
+            "These keys mirror the device's own soft-key pages. Selecting a mode "
+            "takes effect immediately, but the device's on-screen bar keeps "
+            "highlighting its previous entry — trust this panel and the readout, "
+            "not the bar on the device."
         )
         self.hint_label.setWordWrap(True)
 
@@ -163,17 +185,35 @@ class DmmTab(DeviceTab):
         layout.addLayout(readout, stretch=1)
         layout.addWidget(self.controls_widget)
 
-        self._update_set_button()
+        self._refresh_panel()
         self._set_enabled(False)
 
     # --------------------------------------------------------------- mode set
 
-    def _update_set_button(self):
-        pending = self.mode_combo.currentText()
-        self.set_mode_button.setEnabled(pending != self._sent_mode)
-        self.set_mode_button.setText(
-            "Mode is set" if pending == self._sent_mode else f"Set to {pending}"
-        )
+    def _refresh_panel(self):
+        """Show the current page's three modes and mark the app's selected one."""
+        self.page_label.setText(f"Page {self._page + 1}/{len(PAGES)}")
+        for slot, button in enumerate(self.slot_buttons):
+            entry = PAGES[self._page][slot]
+            if entry is None:
+                button.setText("—")
+                button.setEnabled(False)
+                button.setChecked(False)
+                continue
+            label, mode = entry
+            button.setText(label)
+            button.setEnabled(self.device is not None)
+            button.setChecked(mode == self._sent_mode)
+
+    def _next_page(self):
+        self._page = (self._page + 1) % len(PAGES)
+        self._refresh_panel()
+
+    def _select_slot(self, slot: int):
+        entry = PAGES[self._page][slot]
+        if entry is None:
+            return
+        self._set_mode(entry[1])
 
     def _confirm_current_mode(self, mode: str) -> bool:
         box = QMessageBox(self)
@@ -191,23 +231,27 @@ class DmmTab(DeviceTab):
         box.setEscapeButton(QMessageBox.StandardButton.Cancel)
         return box.exec() == QMessageBox.StandardButton.Yes
 
-    def _set_mode(self):
+    def _set_mode(self, mode: str):
         """The only place the GUI changes the measurement mode."""
-        mode = self.mode_combo.currentText()
         if mode in CURRENT_MODES and not self._confirm_current_mode(mode):
+            self._refresh_panel()  # undo the clicked button's checked state
             return
         if not self._apply(lambda d: d.set_dmm_mode(mode)):
+            self._refresh_panel()
             return
         self._sent_mode = mode
         # A new mode means new units; keeping old extremes or history would mix
         # volts and ohms on one axis.
         self._reset_stats()
         self.history.clear()
-        self._update_set_button()
+        self._refresh_panel()
 
     def focus_mode_selector(self):
-        self.mode_combo.setFocus()
-        self.mode_combo.showPopup()
+        """Bring the app's selected mode into view and focus its key."""
+        if self._sent_mode is not None:
+            self._page = _page_of(self._sent_mode)
+            self._refresh_panel()
+        self.slot_buttons[0].setFocus()
 
     def export_history(self):
         self.history.export(self)
@@ -273,29 +317,36 @@ class DmmTab(DeviceTab):
             self.value_label.setText("--")
             self.mode_label.setText("")
             self.history.stop_logging()
-            # The device may be set to anything when it comes back.
-            self._sent_mode = None
-            self._update_set_button()
+        # The device's actual mode is unknown until we read it, and we do not
+        # push one on connect (a current range would be a low-impedance hazard),
+        # so nothing is marked as selected until the user picks a mode.
+        self._sent_mode = None
+        self._refresh_panel()
+
+    def _set_enabled(self, on: bool):
+        super()._set_enabled(on)
+        # The empty slot stays disabled regardless, so re-derive per-slot state.
+        self._refresh_panel()
 
     def apply_theme(self, theme):
         self.history.apply_theme(theme)
 
     def save_settings(self, settings):
-        settings.setValue("dmm/mode", self.mode_combo.currentText())
+        settings.setValue("dmm/page", self._page)
         settings.setValue("dmm/history_window", self.history.window_combo.currentText())
 
     def restore_settings(self, settings):
         from .. import settings as st
 
-        _set_text(self.mode_combo, st.get_str(settings, "dmm/mode", "DC V"))
+        self._page = st.get_int(settings, "dmm/page", 0) % len(PAGES)
         _set_text(
             self.history.window_combo, st.get_str(settings, "dmm/history_window", "5 min")
         )
-        # Deliberately not pushed to the device on connect: silently restoring a
-        # current range would put a low-impedance input on the probes without
-        # the user asking. The combo shows it; the button still has to be used.
+        # Deliberately no mode is pushed on connect: silently restoring a current
+        # range would put a low-impedance input on the probes without the user
+        # asking. Nothing is marked selected until the user picks a mode.
         self._sent_mode = None
-        self._update_set_button()
+        self._refresh_panel()
 
     def shutdown(self):
         self._stop_worker()

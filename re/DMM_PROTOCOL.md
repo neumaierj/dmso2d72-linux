@@ -610,11 +610,58 @@ to **0.993 kΩ Resistance**, stable. And the earlier accidental hit
 - The sweep ended on `cmd=0x0a` = Diode, which is where the device was found.
 - Modes did not "revert"; each successive write simply set another mode.
 
-### Remaining gap: the soft-key selection highlight
-The handler updates the label and redraws the bar, but the owner observed the
-**selection highlight** stay on the old mode. The selection index at
-`0x200048fc + 0x19` (and page at `+0x17`) is not written by this path. Finding
-what updates those is the last piece for a fully consistent remote switch.
+### The soft-key selection highlight — SOLVED (2026-07-21): not USB-reachable
+
+`func=0x0001` sets the measurement mode but does **not** move the on-screen
+soft-key highlight. The full menu model and key path are now decoded, and the
+verdict is that no USB command can drive the highlight with this firmware.
+
+**Menu model.** The DMM soft-key menu is state in the struct at `0x200048fc`:
+- `+0x17` = **page** (0–3), getter `FUN_08023000`
+- `+0x19` = **selection index** (0–10), the master mode selector
+- `FUN_08023992` reads `+0x19` (via `FUN_08023ac4`) and applies the mode;
+  `FUN_08022a28` renders the highlight from `+0x17`/`+0x19`.
+
+Matches the hardware exactly — four pages of three, transcribed from the
+device's own soft-key bar:
+
+| page | F1 | F2 | F3 |
+|------|----|----|----|
+| 1/4 | DC V | OHM (Resistance) | Buzzer (Continuity) |
+| 2/4 | DC A | DC mA | DC mV |
+| 3/4 | AC V | AC A | AC mA |
+| 4/4 | Diode | Capacitance | — |
+
+**Key path.** `FUN_08023acc(keycode)` is the F1–F4 handler: it advances the
+page (`+0x17` mod 4), sets the selection (`+0x19`), then the caller runs
+`FUN_08023992` (apply) + `FUN_08022a28` (render). It is called **only from
+`main()` (`FUN_0802df34`)**, fed a keycode read from `0x2000d525`, which is
+written **only by the scan/debounce routine `FUN_0802ef56`** (a timer ISR, no
+direct callers). The "virtual key" reader `FUN_0802d86c` and the physical
+reader `FUN_0801dd7c` both consume that same byte.
+
+**Why USB cannot reach it.** The USB dispatcher `FUN_0802ca2c` and all its
+handlers (`FUN_0802a824` 0x0001, `FUN_0802ab94` 0x0000, `FUN_0802b50c` 0x0002,
+`FUN_0802ba94` 0x0003) were checked: **none write `+0x17`, `+0x19`, or
+`0x2000d525`.** `func=0x0001` sets the mode via a separate path
+(`FUN_08021e2c` + range routines) and never touches the menu struct.
+`func=0x0003` only *re-renders/applies the existing* selection
+(`FUN_08023d84` → `FUN_08022a28` + `FUN_08023992`); it cannot change it. Every
+one of the ~20 functions referencing `0x200048fc` lives in the DMM-display
+subsystem (`0x08022xxx`–`0x08023xxx`), structurally disjoint from the USB
+handlers (`0x0802axxx`–`0x0802cxxx`).
+
+**Confirmed on hardware (owner watching the screen).** From a consistent OHM
+state (highlight + reading both on OHM), sending `set_dmm_mode("DC V")`:
+the reading changed to DC V, the **highlight stayed on OHM**. Exactly as the
+static analysis predicts. (DC V is F1 and OHM is F2 on the same page, so a
+following highlight would have been unmistakable.)
+
+**Verdict:** the device's own soft-key bar cannot be synced over USB without
+modifying the firmware. The app must be its own source of truth for the
+selected mode. `gui/dmm_tab.py` therefore shows the device's page/slot layout
+and highlights the app-selected mode itself; the note there and in the README
+tells the user not to trust the device's on-screen bar after a remote switch.
 
 ### Supporting detail for the USART2 findings (image B)
 

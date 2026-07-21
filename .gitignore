@@ -10,3 +10,6 @@ dist/
 # firmware RE working dir (copyrighted binary must not be committed)
 re/*.bin
 re/*.dfu
+
+# Device photos (kept locally; may show personal surroundings)
+pictures/

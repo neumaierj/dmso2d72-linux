@@ -13,7 +13,7 @@ from dmso2d72 import protocol as p
 from dmso2d72.device import DeviceNotFound
 from dmso2d72.gui import main_window as mw
 from dmso2d72.gui.awg_tab import AwgTab
-from dmso2d72.gui.dmm_tab import CURRENT_MODES, MODE_ORDER, DmmTab
+from dmso2d72.gui.dmm_tab import CURRENT_MODES, PAGES, DmmTab
 from dmso2d72.gui.scope_tab import ScopeTab
 from fakes import FakeDevice
 
@@ -69,19 +69,67 @@ def test_every_menu_action_is_safe_without_a_device(window):
 # --------------------------------------------------------------- DMM tab
 
 
-def test_mode_selector_offers_every_protocol_mode(qapp):
+def _all_slots():
+    """(page_index, slot_index, mode) for every non-empty soft-key slot."""
+    for pi, page in enumerate(PAGES):
+        for si, entry in enumerate(page):
+            if entry is not None:
+                yield pi, si, entry[1]
+
+
+def _click_mode(tab, mode: str):
+    """Navigate the panel to a mode's page and click its key, like a user would."""
+    for pi, si, m in _all_slots():
+        if m == mode:
+            tab._page = pi
+            tab._refresh_panel()
+            tab.slot_buttons[si].click()
+            return
+    raise AssertionError(f"mode {mode!r} is not on any page")
+
+
+def test_panel_covers_every_protocol_mode_once(qapp):
+    modes = [m for _, _, m in _all_slots()]
+    assert set(modes) == set(p.DMM_MODES)
+    assert len(modes) == len(p.DMM_MODES)  # no duplicates
+
+
+def test_page_layout_matches_the_device(qapp):
     tab = DmmTab()
-    assert set(MODE_ORDER) == set(p.DMM_MODES)
-    assert tab.mode_combo.count() == len(p.DMM_MODES)
+    assert [b.text() for b in tab.slot_buttons] == ["DC V", "OHM", "Buzzer"]
+    tab._next_page()
+    assert [b.text() for b in tab.slot_buttons] == ["DC A", "DC mA", "DC mV"]
 
 
-def test_set_mode_sends_the_command(qapp):
+def test_paging_wraps_and_sends_nothing(qapp):
     tab = DmmTab()
     fake = FakeDevice()
     tab.set_device(fake)
-    tab.mode_combo.setCurrentText("DC V")
-    tab.set_mode_button.click()
+    before = len(fake.calls)
+    for _ in range(len(PAGES)):
+        tab._next_page()
+    assert tab._page == 0  # wrapped back around
+    assert len(fake.calls) == before  # paging never touches the device
+
+
+def test_empty_slot_is_disabled_and_inert(qapp):
+    tab = DmmTab()
+    fake = FakeDevice()
+    tab.set_device(fake)
+    tab._page = 3  # Diode / Capacitance / (empty)
+    tab._refresh_panel()
+    assert not tab.slot_buttons[2].isEnabled()
+    tab._select_slot(2)  # must be a no-op
+    assert "set_dmm_mode" not in fake.method_names()
+
+
+def test_select_sends_the_command_and_marks_it(qapp):
+    tab = DmmTab()
+    fake = FakeDevice()
+    tab.set_device(fake)
+    _click_mode(tab, "DC V")
     assert ("set_dmm_mode", ("DC V",)) in fake.calls
+    assert tab._sent_mode == "DC V"
 
 
 def test_current_mode_asks_first_and_cancel_sends_nothing(qapp, monkeypatch):
@@ -89,9 +137,9 @@ def test_current_mode_asks_first_and_cancel_sends_nothing(qapp, monkeypatch):
     fake = FakeDevice()
     tab.set_device(fake)
     monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Cancel)
-    tab.mode_combo.setCurrentText("DC A")
-    tab.set_mode_button.click()
+    _click_mode(tab, "DC A")
     assert "set_dmm_mode" not in fake.method_names()
+    assert tab._sent_mode is None
 
 
 def test_current_mode_proceeds_when_confirmed(qapp, monkeypatch):
@@ -99,8 +147,7 @@ def test_current_mode_proceeds_when_confirmed(qapp, monkeypatch):
     fake = FakeDevice()
     tab.set_device(fake)
     monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes)
-    tab.mode_combo.setCurrentText("DC A")
-    tab.set_mode_button.click()
+    _click_mode(tab, "DC A")
     assert fake.method_names().count("set_dmm_mode") == 1
 
 
@@ -114,12 +161,10 @@ def test_non_current_modes_do_not_prompt(qapp, monkeypatch):
     tab = DmmTab()
     fake = FakeDevice()
     tab.set_device(fake)
-    for mode in MODE_ORDER:
-        if mode in CURRENT_MODES:
-            continue
-        tab.mode_combo.setCurrentText(mode)
-        tab.set_mode_button.click()
-    assert fake.method_names().count("set_dmm_mode") == len(MODE_ORDER) - len(CURRENT_MODES)
+    non_current = [m for _, _, m in _all_slots() if m not in CURRENT_MODES]
+    for mode in non_current:
+        _click_mode(tab, mode)
+    assert fake.method_names().count("set_dmm_mode") == len(non_current)
 
 
 def test_dmm_mode_is_not_pushed_on_connect(qapp, settings_file):
@@ -274,8 +319,7 @@ def test_mode_change_clears_history_and_stats(qapp):
     tab.set_device(fake)
     tab._show_reading(_reading("550b010800000300090903030255"))
     assert tab.history.has_data() and tab.stats.count == 1
-    tab.mode_combo.setCurrentText("Resistance")
-    tab.set_mode_button.click()
+    _click_mode(tab, "Resistance")
     # Mixing units on one axis or in one min/max would be meaningless.
     assert not tab.history.has_data()
     assert tab.stats.count == 0
