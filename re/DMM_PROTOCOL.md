@@ -482,6 +482,60 @@ writes many (cmd, val0) combinations could in principle disturb calibration
 constants. Prefer targeted, one-write-at-a-time tests with the screen watched,
 over the broad sweep `dmm_setmode_probe.py` performs.
 
+## Dispatcher hunt in image B (2026-07-21) — traced to the dispatch point
+
+The USB receive path is now traced end to end, down to the exact call that
+would invoke the vendor command handler:
+
+```
+vector 0x08005090 (USB_LP_CAN1_RX0)
+  -> 0x08030aae            thunk into FUN_08030a00   (ISR body)
+  -> FUN_08030620          ST CTR_LP: reads EPnR, extracts EP index (& 0xf)
+       |- EP == 0          control/chapter-9 path
+       `- EP != 0          FUN_0803079a  (OUT/RX, clears CTR_RX via & 0xf8f)
+                           FUN_08030770  (IN/TX,  clears CTR_TX via & 0x8f0f)
+                             both do  (*table[EPindex - 1])()
+```
+
+Endpoint callback tables, indexed `[EPindex-1]`:
+
+| table | address |
+|-------|---------|
+| `pEpInt_OUT` (RX) | **`0x20004974`** |
+| `pEpInt_IN` (TX)  | **`0x20004958`** |
+
+The vendor dispatcher is therefore `pEpInt_OUT[1]` — the EP2-OUT callback.
+
+### Blocker: those tables are in RAM and `.data` is compressed
+
+The tables are **RAM**, not flash, so their contents are only established at
+startup. Image B is an ARMCC/Keil build whose scatter-load **decompresses**
+initialised data: `FUN_080304be` is a textbook LZ decompressor (literal runs
+plus length/distance back-references), and the pointer trio at `0x08030218`
+(`0x0802f952`, `0x0802f86c`, `0x0802f8c0`) are the scatter-load helpers.
+
+So the initial contents of `pEpInt_OUT` are **not plain bytes anywhere in the
+dump**, which is why scanning flash for pointer tables in image B finds
+nothing, and why the EP2-OUT callback address cannot simply be read off.
+
+Also re-confirmed for image B: **`0x0101` and `0x0103` never appear as
+comparison immediates** (0 sites), the same as image A — so there is no
+shortcut via constant search. The func code must be tested some other way
+(most likely as separate high/low bytes).
+
+### Ways through, ranked
+
+1. **Decompress `.data` statically.** `FUN_080304be` is fully decompiled, so
+   its algorithm can be ported to Python, run over the compressed image, and
+   `pEpInt_OUT[1]` read directly out of the reconstructed RAM image. Decisive,
+   and the most self-contained option.
+2. **Emulate image B from reset** (e.g. Unicorn) and let the firmware perform
+   its own scatter-load, then read `0x20004974` from emulated RAM. Avoids
+   reimplementing the decompressor correctly, but needs peripheral stubbing.
+3. Find the callback installer by following the scatter-load region table to
+   whichever entry covers `0x20004974`. Attempted; the region table was not
+   located by scanning for `(LMA, VMA, size, fn)` quadruples.
+
 ### Supporting detail for the USART2 findings (image B)
 
 1. **The 14-byte frame arrives on USART2.** The ISR `FUN_08024d5c`
