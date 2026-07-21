@@ -175,13 +175,25 @@ def test_dmm_mode_is_not_pushed_on_connect(qapp, settings_file):
     assert "set_dmm_mode" not in fake.method_names()
 
 
-# --------------------------------------------------------- push on connect
+# --------------------------------------------------------- push on activate
+#
+# set_device no longer pushes: pushing an instrument's commands while the device
+# shows another screen fragments it. push happens in activate(), after the
+# window has selected this tab's screen.
+
+
+def test_set_device_alone_does_not_push(qapp):
+    tab = ScopeTab()
+    fake = FakeDevice()
+    tab.set_device(fake)
+    assert fake.calls == []
 
 
 def test_scope_pushes_each_setting_once_and_starts_last(qapp):
     tab = ScopeTab()
     fake = FakeDevice()
     tab.set_device(fake)
+    tab.activate()
     names = fake.method_names()
     assert names.count("set_time_scale") == 1
     assert names.count("set_trigger_level") == 1
@@ -193,9 +205,20 @@ def test_awg_pushes_settings_but_leaves_output_off(qapp):
     tab = AwgTab()
     fake = FakeDevice()
     tab.set_device(fake)
+    tab.activate()
     assert ("awg_start", (False,)) in fake.calls
     assert ("awg_start", (True,)) not in fake.calls
     assert not tab.start_button.isChecked()
+
+
+def test_activate_pushes_only_once_per_connection(qapp):
+    tab = ScopeTab()
+    fake = FakeDevice()
+    tab.set_device(fake)
+    tab.activate()
+    n = len(fake.calls)
+    tab.activate()  # showing the tab again must not re-push
+    assert len(fake.calls) == n
 
 
 def test_push_aborts_after_first_failure(qapp):
@@ -204,28 +227,84 @@ def test_push_aborts_after_first_failure(qapp):
     tab.device_lost.connect(lost.append)
     fake = FakeDevice(fail_after=3)
     tab.set_device(fake)
+    tab.activate()
     # One report, and no attempt to plough on through the rest.
     assert len(lost) == 1
     assert len(fake.calls) == 4
-
-
-def test_disconnect_does_not_push(qapp):
-    tab = ScopeTab()
-    fake = FakeDevice()
-    tab.set_device(fake)
-    before = len(fake.calls)
-    tab.set_device(None)
-    assert len(fake.calls) == before
 
 
 def test_reconnecting_same_device_pushes_again(qapp):
     tab = ScopeTab()
     fake = FakeDevice()
     tab.set_device(fake)
+    tab.activate()
     first = len(fake.calls)
     tab.set_device(None)
     tab.set_device(fake)
+    tab.activate()
     assert len(fake.calls) == first * 2
+
+
+# ------------------------------------------- device screen follows active tab
+
+
+@pytest.fixture
+def connected_window(qapp, monkeypatch, settings_file):
+    """A MainWindow connected to a FakeDevice, starting on the scope tab."""
+    fake = FakeDevice()
+    monkeypatch.setattr(mw, "Dmso2d72", lambda *a, **k: fake)
+    w = mw.MainWindow()
+    w.tab_widget.setCurrentIndex(0)  # deterministic start
+    fake.calls.clear()
+    w._sync_active_tab()
+    yield w, fake
+    w.close()
+
+
+def test_connect_configures_only_the_active_tab(qapp, monkeypatch, settings_file):
+    fake = FakeDevice()
+    monkeypatch.setattr(mw, "Dmso2d72", lambda *a, **k: fake)
+    w = mw.MainWindow()
+    try:
+        names = fake.method_names()
+        # Whichever tab is active gets its screen set; the others are untouched,
+        # so no scope+AWG+DMM blast that would fragment the screen.
+        assert "set_screen" in names
+        active = w.tab_widget.currentWidget()
+        if active is w.awg_tab:
+            assert "set_awg_type" in names
+        elif active is w.scope_tab:
+            assert "set_time_scale" in names
+        # A tab that is not active must not have been pushed.
+        for tab in w.tabs:
+            if tab is not active:
+                assert not tab._settings_pushed
+    finally:
+        w.close()
+
+
+def test_switching_tab_sets_that_screen_and_pushes_it(qapp, connected_window):
+    w, fake = connected_window
+    fake.calls.clear()
+    idx = w.tab_widget.indexOf(w.awg_tab)
+    w.tab_widget.setCurrentIndex(idx)  # fires _sync_active_tab
+    names = fake.method_names()
+    assert ("set_screen", (p.SCREEN_AWG,)) in fake.calls
+    assert "set_awg_type" in names
+    assert w.awg_tab._settings_pushed
+
+
+def test_returning_to_a_tab_reselects_screen_but_does_not_re_push(qapp, connected_window):
+    w, fake = connected_window
+    awg_idx = w.tab_widget.indexOf(w.awg_tab)
+    w.tab_widget.setCurrentIndex(awg_idx)
+    scope_idx = w.tab_widget.indexOf(w.scope_tab)
+    w.tab_widget.setCurrentIndex(scope_idx)
+    fake.calls.clear()
+    w.tab_widget.setCurrentIndex(awg_idx)  # back to AWG
+    names = fake.method_names()
+    assert ("set_screen", (p.SCREEN_AWG,)) in fake.calls  # screen re-selected
+    assert "set_awg_type" not in names  # but not re-pushed
 
 
 # ------------------------------------------------------------- settings

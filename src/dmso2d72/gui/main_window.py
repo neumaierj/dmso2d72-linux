@@ -49,6 +49,9 @@ class MainWindow(QMainWindow):
 
         for tab in self.tabs:
             tab.device_lost.connect(self._on_device_lost)
+        # The device shows one instrument at a time, so the active tab drives
+        # which screen it shows; see _sync_active_tab.
+        self.tab_widget.currentChanged.connect(lambda _: self._sync_active_tab())
 
         self._build_menus()
 
@@ -195,13 +198,35 @@ class MainWindow(QMainWindow):
             self._on_device_lost(str(e))
 
     def _push_all(self):
+        """Re-send the visible tab's settings (menu action / after knob-twiddling
+        on the device). Only the active tab, so it never fragments the screen."""
         if self.device is None:
             return
+        tab = self.tab_widget.currentWidget()
+        tab._settings_pushed = False
         self.status_label.setText("Configuring device…")
-        for tab in self.tabs:
-            tab.push_settings()
+        self._sync_active_tab()
         if self.device is not None:
             self.status_label.setText(f"Connected: {self.device.product}")
+
+    def _sync_active_tab(self):
+        """Show the active tab's instrument on the device and configure it.
+
+        The device draws whatever screen is up, so pushing an instrument's
+        settings while another screen shows fragments that screen. Selecting the
+        matching screen first (a clean redraw) and pushing only the active tab's
+        settings keeps the device consistent with the app.
+        """
+        if self.device is None:
+            return
+        tab = self.tab_widget.currentWidget()
+        if tab.device_screen is not None:
+            try:
+                self.device.set_screen(tab.device_screen)
+            except DeviceError as e:
+                self._on_device_lost(str(e))
+                return
+        tab.activate()
 
     def _on_device_lost(self, message: str):
         # A failure inside push_settings would otherwise re-enter _set_device
@@ -226,6 +251,9 @@ class MainWindow(QMainWindow):
             tab.set_device(device)
         for action in (self.push_action, self.export_history_action):
             action.setEnabled(device is not None)
+        # Configure only the tab that is actually shown, on its own screen.
+        if device is not None:
+            self._sync_active_tab()
 
     # ---------------------------------------------------------------- lifecycle
 

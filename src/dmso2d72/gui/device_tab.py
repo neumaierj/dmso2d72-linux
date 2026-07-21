@@ -44,12 +44,19 @@ class DeviceTab(QWidget):
 
     device_lost = Signal(str)
 
+    # The device screen this tab controls (protocol.SCREEN_*), or None if it
+    # does not correspond to a device screen. Set by subclasses.
+    device_screen: int | None = None
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.device: Dmso2d72 | None = None
         # Subclasses assign the widget holding their controls; the default
         # _set_enabled greys it out when no device is connected.
         self.controls_widget: QWidget | None = None
+        # push_settings runs once per connection, when the tab is first shown,
+        # so an instrument is only ever configured while its own screen is up.
+        self._settings_pushed = False
 
     def _apply(self, fn: Callable[[Dmso2d72], None]) -> bool:
         """Run a device call, reporting a lost device. False if it did not run."""
@@ -63,16 +70,28 @@ class DeviceTab(QWidget):
         return True
 
     def set_device(self, device: Dmso2d72 | None) -> None:
-        """Attach or detach the device. Subclasses override the hooks, not this."""
+        """Attach or detach the device. Subclasses override the hooks, not this.
+
+        This does NOT push settings — that would send an instrument's commands
+        while the device may be showing a different screen, drawing fragments of
+        this instrument over it. The window calls activate() when the tab is
+        actually shown, by which point its screen has been selected.
+        """
         self.shutdown()
-        was_connected = self.device is not None
         self.device = device
+        self._settings_pushed = False
         self._set_enabled(device is not None)
         self._on_device_changed(device)
-        # Only on a fresh connection, so re-attaching the same device or
-        # disconnecting never floods the bus.
-        if device is not None and not was_connected:
+
+    def activate(self) -> None:
+        """Push settings once, when this tab is first shown while connected.
+
+        The window has already switched the device to this tab's screen, so the
+        commands land on the matching screen instead of fragmenting another.
+        """
+        if self.device is not None and not self._settings_pushed:
             self.push_settings()
+            self._settings_pushed = True
 
     # ------------------------------------------------------------------- hooks
 

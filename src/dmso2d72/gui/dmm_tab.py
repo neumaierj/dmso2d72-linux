@@ -57,6 +57,7 @@ def _page_of(mode: str) -> int:
 
 
 class DmmTab(DeviceTab):
+    device_screen = p.SCREEN_DMM
     reading_taken = Signal(object)
 
     def __init__(self, parent=None):

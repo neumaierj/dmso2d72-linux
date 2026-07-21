@@ -70,6 +70,8 @@ class ChannelBox(QGroupBox):
 
 
 class ScopeTab(DeviceTab):
+    device_screen = p.SCREEN_SCOPE
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker: CaptureWorker | None = None
