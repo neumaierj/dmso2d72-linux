@@ -389,16 +389,62 @@ Two independent states, one feeding the USB frame and one driving the bottom
 line, is a straightforward explanation for a write that changes the reported
 mode while the menu label stays put.
 
-### Open — do not assume either way
+### ANSWERED 2026-07-21: the mode change is REAL — remote mode-select works
 
-**Whether the DMM mode can be set remotely is once again an open question**,
-and the `func=0x0001` hits should be re-examined rather than dismissed. What
-is still unknown: whether a probe write changed the *real* measurement mode
-(implying a control path to the chip, most plausibly GPIO, since it is not
-USART2) or only the STM32's substituted frame and hence just the *reported*
-mode. Distinguishing them needs someone at the device checking whether the
-readings themselves become physically correct for the new mode — not just
-whether the mode label in the frame changes.
+Controlled test on hardware, with a **0.993 kΩ resistor connected** and the
+device in resistance mode, owner watching the screen:
+
+| | before | after |
+|-|--------|-------|
+| frame | `550b010800000300090903030255` | `550b010101000300000000050055` |
+| reading | 0.993 kΩ | 0.000 A |
+| digits (bytes 7–10) | `0,9,9,3` | `0,0,0,0` |
+| byte 4 / byte 12 | `0x00` / `0x02` resistance | `0x01` / `0x00` DC current |
+
+**One** write of `func=0x0001, cmd=0x01, val0=7` did it, and unlike every
+earlier attempt **it persisted** — 12/12 identical reads over 6 s with no
+further writes.
+
+Three independent reasons this is a genuine measurement-mode change, not a
+relabel or a synthesized frame:
+
+1. **The digits changed.** A cosmetic relabel would have kept `0.993` and
+   swapped the unit, giving "0.993 A". The value went to `0.000`, which is
+   physically correct for a current measurement with a resistor and no source.
+2. **The device's own display changed.** The owner confirms the screen now
+   reads "DC 0.000A". The display and the USB reply both render from the
+   buffer at `0x2000d46c`, so this is not a USB-reporting artifact.
+3. **Timing rules out substitution — the decisive argument.** The chip
+   streams a fresh 14-byte frame every **58 ms** (14 × 10 bits / 2400 baud),
+   refilling `0x2000d46c` ~17×/s. The firmware's substitution copy
+   (`FUN_0800cd7c` ← `0x200048fc`) is **one-shot**, guarded by a key edge, so
+   it would be overwritten within 58 ms. A value stable across ~100 incoming
+   frames can only be coming from the chip. **The measurement chip itself
+   switched mode.**
+
+So a control path from the STM32 to the measurement chip **does** exist. It is
+**not** USART2 (still verified receive-only), so it is most likely GPIO —
+locating it is the remaining work.
+
+**The soft-key menu does not track it.** The owner reports the bottom line
+still showed "Ohm" selected while the device measured and displayed DC current.
+The menu is separate state (`DAT_0802329c + 0x19`, page + selection index), so
+a remote switch leaves the UI inconsistent with the actual mode.
+
+⚠️ **Safety.** After a remote switch the device really is in the new mode
+while the menu still claims the old one. Current mode presents a low-impedance
+input; do not connect the leads across a voltage source while the displayed
+menu mode cannot be trusted. Re-select a mode with F1–F4 (or power-cycle) to
+restore a consistent state before using the meter normally.
+
+### Remaining work
+- Map (cmd, val0) → mode properly. The mapping is **state-dependent**: this
+  same `cmd=0x01 val0=7` was previously logged as reaching AC Voltage from a
+  different starting state, but reached DC Current from resistance. Re-derive
+  it from known starting modes, one write at a time, confirming on-screen.
+- Find the GPIO (or other) path the STM32 uses to command the chip.
+- Find whatever the front-panel F1–F4 handler does that *also* updates the
+  menu state, so a remote switch can leave the device consistent.
 
 ### Supporting detail for the USART2 findings (image B)
 
