@@ -37,6 +37,9 @@ FUNC_SCREEN_SETTING = 0x0003
 # Reverse-engineered by hardware probing (see re/DMM_PROTOCOL.md): querying
 # this function returns the live multimeter status/value frame on EP 0x81.
 FUNC_DMM_STATUS = 0x0101
+# Selects the multimeter measurement mode. The firmware handler switches on the
+# cmd byte alone and never reads the value bytes.
+FUNC_DMM_SETTING = 0x0001
 
 # Scope setting commands
 SCOPE_ENABLE_CH1 = 0x00
@@ -287,6 +290,32 @@ DMM_UNITS = {
     0x02: {0x05: OHM, 0x03: "k" + OHM, 0x04: "M" + OHM},  # resistance/continuity
     0x03: {0x00: "nF", 0x01: "µF"},                       # capacitance
 }
+
+
+# Mode name -> cmd byte for FUNC_DMM_SETTING. The names are the labels the
+# firmware itself puts on screen, so the current and voltage ranges appear
+# separately here even though decode_dmm() reports those via the unit instead.
+# Anything outside 0..10 is ignored by the device.
+DMM_MODES = {
+    "AC A": 0,
+    "DC A": 1,
+    "AC mA": 2,
+    "DC mA": 3,
+    "DC mV": 4,
+    "DC V": 5,
+    "AC V": 6,
+    "Capacitance": 7,
+    "Resistance": 8,
+    "Continuity": 9,
+    "Diode": 10,
+}
+
+
+def dmm_mode_command(mode: str) -> bytes:
+    """Command selecting a multimeter mode, one of the DMM_MODES keys."""
+    if mode not in DMM_MODES:
+        raise ValueError(f"unknown DMM mode {mode!r}, expected one of {sorted(DMM_MODES)}")
+    return build_command(FUNC_DMM_SETTING, DMM_MODES[mode])
 
 
 class DmmReading:

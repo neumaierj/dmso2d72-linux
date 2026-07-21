@@ -195,6 +195,15 @@ class Dmso2d72:
 
     # -------------------------------------------------------------------- dmm
 
+    def set_dmm_mode(self, mode: str) -> None:
+        """Select the multimeter mode, one of the protocol.DMM_MODES keys.
+
+        The reading takes a moment to auto-range afterwards. Note the device
+        applies the mode but leaves its own soft-key menu highlighting the
+        previously selected entry (see re/DMM_PROTOCOL.md).
+        """
+        self._send(p.dmm_mode_command(mode))
+
     def read_dmm(self) -> "p.DmmReading | None":
         """Read one multimeter value. Returns None if the device sent no frame
         (e.g. it is not currently on the multimeter screen)."""

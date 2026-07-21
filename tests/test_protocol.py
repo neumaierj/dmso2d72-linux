@@ -256,3 +256,37 @@ def test_decode_dmm_rejects_bad_framing():
         p.decode_dmm(bytes.fromhex("00" * 14))
     with pytest.raises(ValueError):
         p.decode_dmm(bytes.fromhex("550b0301"))  # too short
+
+
+# --- DMM mode selection (func=0x0001, cmd = mode index; value ignored) -------
+# Mapping decoded from the firmware handler FUN_0802a824, verified on hardware:
+# cmd=8 put a connected 0.993 kOhm resistor back on screen as 0.993 kOhm.
+
+
+def test_dmm_mode_command_encoding():
+    cmd = p.dmm_mode_command("DC V")
+    # FUNC_DMM_SETTING = 0x0001 -> bytes 0x01, 0x00; "DC V" is cmd index 5
+    assert cmd == bytes([0x00, 0x0A, 0x01, 0x00, 0x05, 0, 0, 0, 0, 0])
+
+
+def test_dmm_mode_command_resistance():
+    assert p.dmm_mode_command("Resistance")[4] == 8
+
+
+@pytest.mark.parametrize("mode", sorted(p.DMM_MODES))
+def test_dmm_mode_commands_are_well_formed(mode):
+    cmd = p.dmm_mode_command(mode)
+    assert len(cmd) == 10
+    assert cmd[1] == 0x0A
+    assert (cmd[2], cmd[3]) == (0x01, 0x00)
+    # The device ignores cmd > 10, so every mapped mode must stay in range.
+    assert 0 <= cmd[4] <= 10
+
+
+def test_dmm_mode_indices_are_unique():
+    assert len(set(p.DMM_MODES.values())) == len(p.DMM_MODES)
+
+
+def test_dmm_mode_command_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        p.dmm_mode_command("Ohms")
