@@ -523,18 +523,98 @@ comparison immediates** (0 sites), the same as image A — so there is no
 shortcut via constant search. The func code must be tested some other way
 (most likely as separate high/low bytes).
 
-### Ways through, ranked
+### SOLVED by emulating the scatter-load
 
-1. **Decompress `.data` statically.** `FUN_080304be` is fully decompiled, so
-   its algorithm can be ported to Python, run over the compressed image, and
-   `pEpInt_OUT[1]` read directly out of the reconstructed RAM image. Decisive,
-   and the most self-contained option.
-2. **Emulate image B from reset** (e.g. Unicorn) and let the firmware perform
-   its own scatter-load, then read `0x20004974` from emulated RAM. Avoids
-   reimplementing the decompressor correctly, but needs peripheral stubbing.
-3. Find the callback installer by following the scatter-load region table to
-   whichever entry covers `0x20004974`. Attempted; the region table was not
-   located by scanning for `(LMA, VMA, size, fn)` quadruples.
+Porting the decompressor was unnecessary. **The scatter-load runs before any
+peripheral init, so it touches nothing but flash and SRAM and can be emulated
+with memory alone.** `re/ghidra_scatter_emu.py` (Unicorn) maps the dump at
+`0x08000000` plus 64 K of RAM, sets SP to image B's initial `0x2000f560`, and
+runs the loop at `0x08030abc` until it returns — the firmware decompresses its
+own `.data`, and the tables can then be read straight out of emulated RAM.
+44521 RAM writes spanning `0x20001400`–`0x2000f55c`, matching the scatter
+table's destination exactly.
+
+Result — `0x08030230` is the default handler (`bx lr`), filling 12 of 14 slots:
+
+| slot | value | resolves to |
+|------|-------|-------------|
+| `pEpInt_OUT[1]` (EP2 OUT) | `0x08030ba0` | `b.w` → **`0x0802d834`** |
+| `pEpInt_IN[0]` (EP1 IN) | `0x08030b9c` | `b.w` → `0x0802d82c` |
+
+## THE VENDOR COMMAND PATH (complete)
+
+```
+EP2 OUT interrupt
+  -> FUN_0802d834      GetEPRxCount(EP2); PMAToUserBufferCopy(0x2000d294, 0xd8, n);
+                       *0x2000d557 = 0xff        (command-pending flag)
+  -> FUN_0802df34      main() polls ...
+     -> FUN_0802ca2c   func dispatch, on the command buffer at 0x2000d294
+        -> per-func handler
+```
+
+| RAM | meaning |
+|-----|---------|
+| `0x2000d294` | **command buffer** — the received 10-byte packet |
+| `0x2000d522` | received byte count |
+| `0x2000d557` | command-pending flag (`0xff` = packet waiting) |
+
+`FUN_0802ca2c` tests **`buf[2]` and `buf[3]` separately** — func low byte then
+high byte. That is why `0x0101`/`0x0103` never appear as 16-bit immediates.
+
+| func | handler | role |
+|------|---------|------|
+| `0x0000` | `FUN_0802ab94` | scope settings (switches on `buf[4]` = cmd) |
+| `0x0100` | `FUN_0802b0bc` | scope capture |
+| **`0x0001`** | **`FUN_0802a824`** | **DMM mode set** |
+| `0x0101` | `FUN_0802aa10` | DMM status reply (builds the `0x55` frame) |
+| `0x0002` | `FUN_0802b50c` | AWG settings |
+| `0x0102` | `FUN_0802b900` | AWG reply |
+| `0x0003` | `FUN_0802ba94` | screen select |
+| `0x0103` | `FUN_0802c758` | config reply |
+
+## DMM mode set: `func=0x0001`, `cmd` = mode index, value ignored
+
+`FUN_0802a824` switches on `buf[4]` (**cmd**) only. `val0..3` are never read,
+and `default:` returns without acting — so `cmd > 10` is a no-op.
+
+| cmd | firmware label | mode | internal id |
+|----:|----------------|------|------------:|
+| 0 | `AC A` | AC Current | 2 |
+| 1 | `DC A` | DC Current | 1 |
+| 2 | `AC mA` | AC Current (mA) | 4 |
+| 3 | `DC mA` | DC Current (mA) | 3 |
+| 4 | `DC mV` | DC Voltage (mV) | 9 |
+| 5 | `DC V` | DC Voltage | 10 |
+| 6 | `AC V` | AC Voltage | 11 |
+| 7 | `DIAN RONG` (电容) | Capacitance | 5 |
+| 8 | `DIAN ZU` (电阻) | Resistance | 6 |
+| 9 | `TONG DUAN` (通断) | Continuity | 7 |
+| 10 | `ER JI GUAN` (二极管) | Diode | 8 |
+
+Each case sets the on-screen label (`FUN_08014a48`), redraws the soft-key bar
+(`FUN_08023238`), sets the mode (`FUN_08021e2c`) and commands the measurement
+hardware (`FUN_0802507e` / `FUN_080250ba` / `FUN_08025132` / …), then stores
+the internal id to `*DAT_0802b4fc`.
+
+**Verified on hardware** with a 0.993 kΩ resistor connected:
+`func=0x0001 cmd=8` → briefly Capacitance/OL while auto-ranging, then settled
+to **0.993 kΩ Resistance**, stable. And the earlier accidental hit
+`cmd=0x01` → **DC Current**, exactly matching `cmd 1 = DC A`.
+
+### This explains every earlier observation
+- The sweep swept `cmd` 0x00–0x0f × `val0` 0x00–0x0a. Only `cmd` 0–10 do
+  anything and `val0` is ignored, so **each iteration set a different mode** —
+  the "drift" (76/187 rows changing between probes) was the sweep itself
+  walking the mode table, not noise, and `cmd` 0x0b–0x0f were inert exactly as
+  observed.
+- The sweep ended on `cmd=0x0a` = Diode, which is where the device was found.
+- Modes did not "revert"; each successive write simply set another mode.
+
+### Remaining gap: the soft-key selection highlight
+The handler updates the label and redraws the bar, but the owner observed the
+**selection highlight** stay on the old mode. The selection index at
+`0x200048fc + 0x19` (and page at `+0x17`) is not written by this path. Finding
+what updates those is the last piece for a fully consistent remote switch.
 
 ### Supporting detail for the USART2 findings (image B)
 
