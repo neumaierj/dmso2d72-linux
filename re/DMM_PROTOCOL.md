@@ -414,13 +414,21 @@ relabel or a synthesized frame:
 2. **The device's own display changed.** The owner confirms the screen now
    reads "DC 0.000A". The display and the USB reply both render from the
    buffer at `0x2000d46c`, so this is not a USB-reporting artifact.
-3. **Timing rules out substitution — the decisive argument.** The chip
-   streams a fresh 14-byte frame every **58 ms** (14 × 10 bits / 2400 baud),
-   refilling `0x2000d46c` ~17×/s. The firmware's substitution copy
-   (`FUN_0800cd7c` ← `0x200048fc`) is **one-shot**, guarded by a key edge, so
-   it would be overwritten within 58 ms. A value stable across ~100 incoming
-   frames can only be coming from the chip. **The measurement chip itself
-   switched mode.**
+3. **The substitution source still says "resistance" — the decisive
+   argument.** The copy `FUN_0800cd7c(0x2000d46c ← 0x200048fc, 0xe)` takes its
+   14 bytes from the struct at `0x200048fc`, and **that is the same struct
+   holding the soft-key menu state** (page at `+0x17`, selection at `+0x19`).
+   The menu still read "Ohm" throughout. So had the firmware been substituting
+   a frame, the display would have shown *resistance*. It showed DC current.
+   Therefore no substitution was in play and the frame came from the chip.
+   **The measurement chip itself switched mode.**
+
+   ⚠️ Correction: an earlier version of this list argued from timing, claiming
+   the copy was "one-shot behind a key-edge guard". That was a misreading —
+   `FUN_080244d6`/`FUN_080244d0` index `DAT_08024694 = 0x2000d46c`, i.e. they
+   read **frame bytes 12 and 10**, not key state, so the guard is a test of
+   frame annunciator bits and the copy is not key-driven. The conclusion is
+   unchanged; the reason above replaces it and does not depend on timing.
 
 So a control path from the STM32 to the measurement chip **does** exist. It is
 **not** USART2 (still verified receive-only), so it is most likely GPIO —
@@ -437,14 +445,42 @@ input; do not connect the leads across a voltage source while the displayed
 menu mode cannot be trusted. Re-select a mode with F1–F4 (or power-cycle) to
 restore a consistent state before using the meter normally.
 
-### Remaining work
-- Map (cmd, val0) → mode properly. The mapping is **state-dependent**: this
-  same `cmd=0x01 val0=7` was previously logged as reaching AC Voltage from a
-  different starting state, but reached DC Current from resistance. Re-derive
-  it from known starting modes, one write at a time, confirming on-screen.
-- Find the GPIO (or other) path the STM32 uses to command the chip.
-- Find whatever the front-panel F1–F4 handler does that *also* updates the
-  menu state, so a remote switch can leave the device consistent.
+### Known RAM layout (image B)
+
+| address | meaning |
+|---------|---------|
+| `0x2000d46c` | 14-byte DMM frame buffer — filled by the USART2 RX ISR, read by **both** the LCD renderer and the USB reply |
+| `0x2000d554` / `0x2000d555` | RX index / frame-ready flag |
+| `0x200048fc` | UI/mode struct: 14-byte frame template at offset 0, **page at `+0x17`**, **selection index at `+0x19`** |
+
+That two-buffer split is the whole story: the remote write changes the chip
+(hence `0x2000d46c`, hence display and USB), while the menu reads
+`0x200048fc`, which nothing updated.
+
+### Fixing the menu desync — the options
+
+The `func=0x0001` path is almost certainly **not** the intended interface; it
+reaches the measurement path as a side effect and skips the UI bookkeeping.
+
+1. **Find image B's real vendor dispatcher (highest value).** The Windows
+   software presumably switches modes cleanly, so a proper command likely
+   exists and would update both by construction. This also subsumes the other
+   open item — the dispatcher is what `func=0x0001` writes are landing in.
+2. **Emulate an F1–F4 key press.** The firmware's own handler updates mode and
+   menu together. Needs the key input path: GPIO scan → key-state variable →
+   handler, then a USB-reachable write to that variable. Note the earlier
+   candidate for this was the misread above, so the key path is **not yet
+   located** — start from the GPIO port the buttons sit on.
+3. **Write `0x200048fc + 0x17/0x19` directly.** Only viable if some command
+   can reach arbitrary RAM; fragile and would desync in the other direction if
+   the chip did not actually switch. Last resort.
+
+⚠️ **Caution before more blind sweeping.** The firmware contains the strings
+`This is Calibration mode`, `Cancel`, `Next` near the mode labels, so some of
+this command space is plausibly a calibration/service channel. A sweep that
+writes many (cmd, val0) combinations could in principle disturb calibration
+constants. Prefer targeted, one-write-at-a-time tests with the screen watched,
+over the broad sweep `dmm_setmode_probe.py` performs.
 
 ### Supporting detail for the USART2 findings (image B)
 
