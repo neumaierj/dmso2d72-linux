@@ -1,13 +1,17 @@
-"""Multimeter tab: live readings, mode selection, min/max and history.
+"""Multimeter view: live reading, grouped mode selection, min/max and history.
 
 Both the readout and the mode-set command were reverse-engineered from the
-firmware and verified against the device (see re/DMM_PROTOCOL.md). Every mode
-is decoded, and the mode can be selected from here.
+firmware and verified against the device (see re/DMM_PROTOCOL.md). Every mode is
+decoded and settable, and the panel follows the device's real mode (from the
+status frame) whether it was changed here or with the physical keys.
+
+Readings arrive from the window's DeviceMonitor via show_reading(); this view no
+longer polls the device itself.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFormLayout,
@@ -22,10 +26,9 @@ from PySide6.QtWidgets import (
 )
 
 from .. import protocol as p
-from ..capture import DmmWorker
 from ..device import Dmso2d72
 from ..dmm_stats import DmmStats
-from .device_tab import DeviceTab, _set_text
+from .device_tab import DeviceTab
 from .dmm_history import DmmHistoryView
 
 # Modes that turn the input into a low-impedance shunt. Selecting one by
@@ -33,36 +36,24 @@ from .dmm_history import DmmHistoryView
 # are confirmed first.
 CURRENT_MODES = ("AC A", "DC A", "AC mA", "DC mA")
 
-# The device's own soft-key layout, transcribed from the hardware: four pages,
-# three slots each (F1/F2/F3), F4 cycles pages. Each slot is
-# (button label as shown on the device, protocol.DMM_MODES key) or None for the
-# one empty slot. Selecting a mode here uses the same func=0x0001 command the
-# device's own keys use, but the device's on-screen highlight cannot be driven
-# over USB (firmware limitation, see re/DMM_PROTOCOL.md), so this panel — not
-# the device's bar — reflects what the app selected.
-PAGES = (
-    (("DC V", "DC V"), ("OHM", "Resistance"), ("Buzzer", "Continuity")),
-    (("DC A", "DC A"), ("DC mA", "DC mA"), ("DC mV", "DC mV")),
-    (("AC V", "AC V"), ("AC A", "AC A"), ("AC mA", "AC mA")),
-    (("Diode", "Diode"), ("Cap", "Capacitance"), None),
+# Every mode grouped by category, all visible at once (no paging). Each entry is
+# (button label, protocol.DMM_MODES key); labels use the device's own wording.
+GROUPS = (
+    ("Voltage", (("DC V", "DC V"), ("AC V", "AC V"), ("DC mV", "DC mV"))),
+    ("Current", (("DC A", "DC A"), ("AC A", "AC A"), ("DC mA", "DC mA"), ("AC mA", "AC mA"))),
+    ("Resistance · Continuity · Diode",
+     (("OHM", "Resistance"), ("Buzzer", "Continuity"), ("Diode", "Diode"))),
+    ("Capacitance", (("Capacitance", "Capacitance"),)),
 )
 
 
-def _page_of(mode: str) -> int:
-    """The page index (0-3) that holds a given mode key, or 0 if not found."""
-    for i, page in enumerate(PAGES):
-        if any(slot and slot[1] == mode for slot in page):
-            return i
-    return 0
-
-
 def _slot_for_reading(reading) -> str | None:
-    """The soft-key a live reading corresponds to, from its mode and range.
+    """The mode a live reading corresponds to, from its decoded mode and unit.
 
-    The device does not report which soft-key is highlighted, but a reading's
-    decoded mode plus its unit prefix pin it down uniquely — so the panel can
-    follow the device's real mode even when it is changed with the physical
-    keys, not just from the app. Returns a PAGES mode key, or None if unmapped.
+    The device does not report which mode is selected, but a reading's mode plus
+    its unit prefix pin it down uniquely, so the panel can follow the device's
+    real mode even when it is changed with the physical keys. Returns a
+    DMM_MODES key, or None if unmapped.
     """
     mode, unit = reading.mode, reading.unit
     if mode == "DC Voltage":
@@ -83,14 +74,11 @@ def _slot_for_reading(reading) -> str | None:
 
 class DmmTab(DeviceTab):
     device_screen = p.SCREEN_DMM
-    reading_taken = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.worker: DmmWorker | None = None
         self.stats = DmmStats()
         self._active_mode: str | None = None
-        self._page = 0
         # Debounce for following the device's live mode: a mid-switch frame can
         # briefly decode as another mode, so a new mode must persist before the
         # panel follows it.
@@ -102,7 +90,9 @@ class DmmTab(DeviceTab):
         self._expecting: str | None = None
         self._expecting_left = 0
 
+        # ------------------------------------------------------------- readout
         self.value_label = QLabel("--")
+        self.value_label.setObjectName("dmmValue")
         self.value_label.setAlignment(Qt.AlignCenter)
         font = QFont()
         font.setPointSize(48)
@@ -110,6 +100,7 @@ class DmmTab(DeviceTab):
         self.value_label.setFont(font)
 
         self.mode_label = QLabel("")
+        self.mode_label.setObjectName("dmmMode")
         self.mode_label.setAlignment(Qt.AlignCenter)
         mode_font = QFont()
         mode_font.setPointSize(16)
@@ -128,10 +119,6 @@ class DmmTab(DeviceTab):
             stats_grid.addWidget(caption, 0, col)
             stats_grid.addWidget(widget, 1, col)
 
-        self.history = DmmHistoryView()
-
-        # The reading is what this tab is for, so it gets as much room as the
-        # history and sits centred rather than pinned to the top.
         reading_panel = QVBoxLayout()
         reading_panel.addStretch()
         reading_panel.addWidget(self.value_label)
@@ -139,73 +126,50 @@ class DmmTab(DeviceTab):
         reading_panel.addSpacing(24)
         reading_panel.addLayout(stats_grid)
         reading_panel.addStretch()
-        reading_widget = QWidget()
-        reading_widget.setLayout(reading_panel)
+        self.screen_panel = QWidget()
+        self.screen_panel.setObjectName("dmmScreen")
+        self.screen_panel.setLayout(reading_panel)
+
+        self.history = DmmHistoryView()
 
         readout = QVBoxLayout()
-        readout.addWidget(reading_widget, stretch=1)
+        readout.addWidget(self.screen_panel, stretch=1)
         readout.addWidget(self.history, stretch=1)
 
         # ------------------------------------------------------------ controls
-
-        # Soft-key panel mirroring the device: a page indicator + F4 to page,
-        # and three mode keys for the current page. Clicking a key selects that
-        # specific mode immediately (direct select), so any visible mode is one
-        # click away; F4 only changes which three are shown.
-        self.page_label = QLabel()
-        self.page_label.setAlignment(Qt.AlignCenter)
-        self.page_button = QPushButton("F4 ▶")
-        self.page_button.setToolTip("Next page of modes")
-        self.page_button.clicked.connect(self._next_page)
-
-        page_row = QHBoxLayout()
-        page_row.addWidget(self.page_label, stretch=1)
-        page_row.addWidget(self.page_button)
-
-        self.slot_buttons = []
-        slot_row = QHBoxLayout()
-        for slot in range(3):
-            button = QPushButton()
-            button.setCheckable(True)
-            # The selected mode gets the theme's highlight colour, so which mode
-            # is active reads at a glance in either theme.
-            button.setStyleSheet(
-                "QPushButton:checked { background-color: palette(highlight);"
-                " color: palette(highlighted-text); font-weight: bold; }"
-            )
-            button.clicked.connect(lambda _=False, s=slot: self._select_slot(s))
-            self.slot_buttons.append(button)
-            slot_row.addWidget(button)
-
+        # One button per mode, grouped by category, all visible.
+        self._mode_buttons: dict[str, QPushButton] = {}
         mode_box = QGroupBox("Measurement mode")
         mode_layout = QVBoxLayout(mode_box)
-        mode_layout.addLayout(page_row)
-        mode_layout.addLayout(slot_row)
+        for title, entries in GROUPS:
+            group = QGroupBox(title)
+            grid = QGridLayout(group)
+            for i, (label, mode) in enumerate(entries):
+                button = QPushButton(label)
+                button.setCheckable(True)
+                button.setStyleSheet(
+                    "QPushButton:checked { background-color: palette(highlight);"
+                    " color: palette(highlighted-text); font-weight: bold; }"
+                )
+                button.clicked.connect(lambda _=False, m=mode: self._set_mode(m))
+                self._mode_buttons[mode] = button
+                grid.addWidget(button, i // 2, i % 2)
+            mode_layout.addWidget(group)
 
-        self.start_button = QPushButton("Start reading")
-        self.start_button.setCheckable(True)
-        self.start_button.toggled.connect(self._toggle)
         self.hold_button = QPushButton("Hold")
         self.hold_button.setCheckable(True)
-        self.hold_button.setToolTip("Freeze the display; polling continues")
+        self.hold_button.setToolTip("Freeze the display; the device keeps measuring")
         self.reset_button = QPushButton("Reset min/max")
         self.reset_button.clicked.connect(self._reset_stats)
-        self.switch_button = QPushButton("Show multimeter on device")
-        self.switch_button.clicked.connect(self._switch_to_dmm)
-
         read_box = QGroupBox("Reading")
         read_form = QFormLayout(read_box)
-        read_form.addRow(self.start_button)
         read_form.addRow(self.hold_button)
         read_form.addRow(self.reset_button)
-        read_form.addRow(self.switch_button)
 
         self.hint_label = QLabel(
-            "These keys mirror the device's own soft-key pages, and follow the "
-            "live reading — so pressing F1–F4 on the device highlights the mode "
-            "here too. The device's own on-screen bar, however, keeps "
-            "highlighting its previous entry, so trust this panel and the "
-            "readout rather than the bar on the device."
+            "Modes follow the live reading, so pressing the F‑keys on the device "
+            "highlights the mode here too. The device's own soft‑key bar keeps "
+            "its previous entry, so trust this panel and the readout."
         )
         self.hint_label.setWordWrap(True)
 
@@ -216,41 +180,22 @@ class DmmTab(DeviceTab):
         column.addStretch()
         self.controls_widget = QWidget()
         self.controls_widget.setLayout(column)
-        self.controls_widget.setMaximumWidth(260)
+        self.controls_widget.setMaximumWidth(280)
 
         layout = QHBoxLayout(self)
         layout.addLayout(readout, stretch=1)
         layout.addWidget(self.controls_widget)
 
-        self._refresh_panel()
+        self._refresh_modes()
         self._set_enabled(False)
 
     # --------------------------------------------------------------- mode set
 
-    def _refresh_panel(self):
-        """Show the current page's three modes and mark the app's selected one."""
-        self.page_label.setText(f"Page {self._page + 1}/{len(PAGES)}")
-        for slot, button in enumerate(self.slot_buttons):
-            entry = PAGES[self._page][slot]
-            if entry is None:
-                button.setText("—")
-                button.setEnabled(False)
-                button.setChecked(False)
-                continue
-            label, mode = entry
-            button.setText(label)
+    def _refresh_modes(self):
+        """Enable/disable buttons and mark the active mode."""
+        for mode, button in self._mode_buttons.items():
             button.setEnabled(self.device is not None)
             button.setChecked(mode == self._active_mode)
-
-    def _next_page(self):
-        self._page = (self._page + 1) % len(PAGES)
-        self._refresh_panel()
-
-    def _select_slot(self, slot: int):
-        entry = PAGES[self._page][slot]
-        if entry is None:
-            return
-        self._set_mode(entry[1])
 
     def _confirm_current_mode(self, mode: str) -> bool:
         box = QMessageBox(self)
@@ -271,10 +216,10 @@ class DmmTab(DeviceTab):
     def _set_mode(self, mode: str):
         """The only place the GUI changes the measurement mode."""
         if mode in CURRENT_MODES and not self._confirm_current_mode(mode):
-            self._refresh_panel()  # undo the clicked button's checked state
+            self._refresh_modes()  # undo the clicked button's checked state
             return
         if not self._apply(lambda d: d.set_dmm_mode(mode)):
-            self._refresh_panel()
+            self._refresh_modes()
             return
         self._active_mode = mode
         # Wait for the device to reach this mode before live-follow resumes, so
@@ -287,23 +232,19 @@ class DmmTab(DeviceTab):
         # volts and ohms on one axis.
         self._reset_stats()
         self.history.clear()
-        self._page = _page_of(mode)
-        self._refresh_panel()
+        self._refresh_modes()
 
     def focus_mode_selector(self):
-        """Bring the app's selected mode into view and focus its key."""
-        if self._active_mode is not None:
-            self._page = _page_of(self._active_mode)
-            self._refresh_panel()
-        self.slot_buttons[0].setFocus()
+        """Focus the active mode's button, or the first one."""
+        button = self._mode_buttons.get(self._active_mode)
+        if button is None:
+            button = next(iter(self._mode_buttons.values()))
+        button.setFocus()
 
     def export_history(self):
         self.history.export(self)
 
     # ---------------------------------------------------------------- reading
-
-    def _switch_to_dmm(self):
-        self._apply(lambda d: d.set_screen(p.SCREEN_DMM))
 
     def _reset_stats(self):
         self.stats.reset()
@@ -311,37 +252,13 @@ class DmmTab(DeviceTab):
         self.max_label.setText("--")
         self.count_label.setText("0")
 
-    def _toggle(self, on: bool):
-        self.start_button.setText("Stop reading" if on else "Start reading")
-        if on:
-            if self.device is None:
-                self.start_button.setChecked(False)
-                return
-            self.worker = DmmWorker(self.device)
-            self.worker.reading.connect(self._show_reading)
-            self.worker.failed.connect(self._worker_failed)
-            self.worker.start()
-        else:
-            self._stop_worker()
-            self.value_label.setText("--")
-            self.mode_label.setText("")
-
-    def _stop_worker(self):
-        if self.worker is not None:
-            self.worker.stop()
-            self.worker.wait(2000)
-            self.worker = None
-
-    def _worker_failed(self, message: str):
-        self.start_button.setChecked(False)
-        self.device_lost.emit(message)
-
-    def _show_reading(self, reading):
+    def show_reading(self, reading):
+        """Display a reading from the window's DeviceMonitor."""
         if self.hold_button.isChecked():
             return
         if reading is None:
             self.value_label.setText("—")
-            self.mode_label.setText("device is not on the multimeter screen")
+            self.mode_label.setText("no reading")
             return
         self._follow_device_mode(reading)
         self.value_label.setText(reading.formatted())
@@ -351,15 +268,13 @@ class DmmTab(DeviceTab):
         self.max_label.setText(self.stats.format(self.stats.max))
         self.count_label.setText(str(self.stats.count))
         self.history.add(reading)
-        self.reading_taken.emit(reading)
 
     def _follow_device_mode(self, reading):
-        """Move the panel highlight to the device's real mode, from the reading.
+        """Move the highlight to the device's real mode, from the reading.
 
         Follows a change whether the app or the physical keys caused it. A new
         mode must persist for two readings before we act, so a torn mid-switch
-        frame does not make the highlight flicker. Because a mode change means
-        new units, the stats and history reset with it.
+        frame does not flicker the highlight. A mode change resets stats/history.
         """
         slot = _slot_for_reading(reading)
         if self._expecting is not None:
@@ -383,49 +298,41 @@ class DmmTab(DeviceTab):
         self._pending_count = 0
         self._reset_stats()
         self.history.clear()
-        self._page = _page_of(slot)
-        self._refresh_panel()
+        self._refresh_modes()
 
     # ----------------------------------------------------------- device state
 
     def _on_device_changed(self, device: Dmso2d72 | None):
         if device is None:
-            self.start_button.setChecked(False)
             self.hold_button.setChecked(False)
             self.value_label.setText("--")
             self.mode_label.setText("")
             self.history.stop_logging()
         # The device's actual mode is unknown until we read it, and we do not
         # push one on connect (a current range would be a low-impedance hazard),
-        # so nothing is marked as selected until the user picks a mode.
+        # so nothing is marked selected until a reading arrives or the user picks.
         self._active_mode = None
-        self._refresh_panel()
+        self._refresh_modes()
 
     def _set_enabled(self, on: bool):
         super()._set_enabled(on)
-        # The empty slot stays disabled regardless, so re-derive per-slot state.
-        self._refresh_panel()
+        self._refresh_modes()
 
     def apply_theme(self, theme):
         self.history.apply_theme(theme)
 
     def save_settings(self, settings):
-        settings.setValue("dmm/page", self._page)
         settings.setValue("dmm/history_window", self.history.window_combo.currentText())
 
     def restore_settings(self, settings):
         from .. import settings as st
+        from .device_tab import _set_text
 
-        self._page = st.get_int(settings, "dmm/page", 0) % len(PAGES)
         _set_text(
             self.history.window_combo, st.get_str(settings, "dmm/history_window", "5 min")
         )
-        # Deliberately no mode is pushed on connect: silently restoring a current
-        # range would put a low-impedance input on the probes without the user
-        # asking. Nothing is marked selected until the user picks a mode.
         self._active_mode = None
-        self._refresh_panel()
+        self._refresh_modes()
 
     def shutdown(self):
-        self._stop_worker()
         self.history.stop_logging()

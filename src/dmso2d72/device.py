@@ -205,8 +205,8 @@ class Dmso2d72:
         self._send(p.dmm_mode_command(mode))
 
     def read_dmm(self) -> "p.DmmReading | None":
-        """Read one multimeter value. Returns None if the device sent no frame
-        (e.g. it is not currently on the multimeter screen)."""
+        """Read one multimeter value. The multimeter chip streams continuously,
+        so this returns a frame on any screen; None only on a malformed reply."""
         frame = self.raw_query(p.FUNC_DMM_STATUS, 0x00)
         if len(frame) != p.DMM_FRAME_LEN:
             return None
@@ -214,6 +214,14 @@ class Dmso2d72:
             return p.decode_dmm(frame)
         except ValueError:
             return None
+
+    def active_measurement(self) -> str | None:
+        """Which measurement screen the device shows: "scope", "dmm", or None.
+
+        The device only exposes scope-vs-not over USB, so "dmm" also covers the
+        AWG screen (see protocol.decode_measurement)."""
+        frame = self.raw_query(p.FUNC_CONFIG, 0x00)
+        return p.decode_measurement(frame)
 
     # ------------------------------------------------------------------- screen
 

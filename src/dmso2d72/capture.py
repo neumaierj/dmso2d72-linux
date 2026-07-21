@@ -50,13 +50,20 @@ class CaptureWorker(QThread):
             self.msleep(50)
 
 
-class DmmWorker(QThread):
-    """Continuously polls the multimeter while running.
+class DeviceMonitor(QThread):
+    """Low-rate poll of the device's active measurement and multimeter reading.
 
-    Emits reading with a protocol.DmmReading (or None if the device is not on
-    the multimeter screen), or failed with a message on USB error.
+    Runs the whole time a device is connected so the app can mirror the device
+    (which measurement screen it shows) and keep the multimeter readout live. It
+    shares the device lock with the scope CaptureWorker; to avoid contending
+    with a running capture it reads the multimeter only when the device is not
+    on the scope screen (the reading is only needed on the DMM view anyway).
+
+    Emits measurement_changed("scope"|"dmm") when the active measurement
+    changes, reading(DmmReading|None) for the multimeter, or failed on error.
     """
 
+    measurement_changed = Signal(str)
     reading = Signal(object)
     failed = Signal(str)
 
@@ -64,6 +71,7 @@ class DmmWorker(QThread):
         super().__init__(parent)
         self._device = device
         self._stop = False
+        self._last_measurement: str | None = None
 
     def stop(self) -> None:
         self._stop = True
@@ -71,10 +79,14 @@ class DmmWorker(QThread):
     def run(self) -> None:
         while not self._stop:
             try:
-                value = self._device.read_dmm()
+                measurement = self._device.active_measurement()
+                if measurement is not None and measurement != self._last_measurement:
+                    self._last_measurement = measurement
+                    self.measurement_changed.emit(measurement)
+                if measurement != "scope":
+                    self.reading.emit(self._device.read_dmm())
             except DeviceError as e:
                 if not self._stop:
                     self.failed.emit(str(e))
                 return
-            self.reading.emit(value)
-            self.msleep(200)
+            self.msleep(250)

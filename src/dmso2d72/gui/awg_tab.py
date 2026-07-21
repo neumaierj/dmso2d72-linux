@@ -1,7 +1,17 @@
-"""Signal generator (AWG) tab."""
+"""Signal generator (AWG): a parallel side panel.
+
+The generator runs independently of the measurement, so it is shown alongside
+the Scope/DMM view rather than as its own tab. Its commands would draw onto
+whatever screen the device shows, so edits are debounced and applied by the
+window on the device's AWG screen (set_apply_hook), then it returns to the
+measurement screen — see MainWindow._apply_awg.
+"""
 
 from __future__ import annotations
 
+from typing import Callable
+
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -32,6 +42,16 @@ class AwgTab(DeviceTab):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setMaximumWidth(340)
+
+        # Edits are coalesced and handed to the window's apply hook, which
+        # applies them on the device's AWG screen.
+        self._apply_hook: Callable[[list], None] | None = None
+        self._pending: list = []
+        self._apply_timer = QTimer(self)
+        self._apply_timer.setSingleShot(True)
+        self._apply_timer.setInterval(300)
+        self._apply_timer.timeout.connect(self._flush)
 
         self.wave_type = QComboBox()
         self.wave_type.addItems(p.AWG_TYPES)
@@ -123,25 +143,59 @@ class AwgTab(DeviceTab):
 
     def _wire_controls(self):
         self.wave_type.currentTextChanged.connect(
-            lambda text: self._apply(lambda d: d.set_awg_type(text))
+            lambda text: self._queue(lambda d: d.set_awg_type(text))
         )
         self.wave_type.currentTextChanged.connect(self._update_duty_visibility)
         self.frequency.valueChanged.connect(
-            lambda v: self._apply(lambda d: d.set_awg_frequency(v))
+            lambda v: self._queue(lambda d: d.set_awg_frequency(v))
         )
         self.amplitude.valueChanged.connect(
-            lambda v: self._apply(lambda d: d.set_awg_amplitude(v))
+            lambda v: self._queue(lambda d: d.set_awg_amplitude(v))
         )
-        self.offset.valueChanged.connect(lambda v: self._apply(lambda d: d.set_awg_offset(v)))
+        self.offset.valueChanged.connect(lambda v: self._queue(lambda d: d.set_awg_offset(v)))
         self.square_duty.valueChanged.connect(
-            lambda v: self._apply(lambda d: d.set_awg_square_duty(v))
+            lambda v: self._queue(lambda d: d.set_awg_square_duty(v))
         )
         self.ramp_duty.valueChanged.connect(
-            lambda v: self._apply(lambda d: d.set_awg_ramp_duty(v))
+            lambda v: self._queue(lambda d: d.set_awg_ramp_duty(v))
         )
         for spin in (self.trap_rise, self.trap_high, self.trap_low):
-            spin.valueChanged.connect(lambda _: self._apply(self._send_trap_duty))
+            spin.valueChanged.connect(lambda _: self._queue(self._send_trap_duty))
         self.start_button.toggled.connect(self._toggle_output)
+
+    def set_apply_hook(self, hook: Callable[[list], None]) -> None:
+        """The window sets this to apply AWG commands on the AWG screen."""
+        self._apply_hook = hook
+
+    def _queue(self, fn) -> None:
+        """Coalesce a device call; applied after a short idle (one screen bounce)."""
+        self._pending.append(fn)
+        self._apply_timer.start()
+
+    def _flush(self) -> None:
+        if not self._pending or self.device is None:
+            self._pending.clear()
+            return
+        fns, self._pending = self._pending, []
+        if self._apply_hook is not None:
+            self._apply_hook(fns)
+        else:  # standalone / tests: apply directly
+            for fn in fns:
+                if not self._apply(fn):
+                    break
+
+    def push_fn(self, device: Dmso2d72) -> None:
+        """Apply every setting to a device, output off. Called inside the window's
+        AWG-screen bounce, so it runs directly (not via _apply)."""
+        device.set_awg_type(self.wave_type.currentText())
+        device.set_awg_frequency(self.frequency.value())
+        device.set_awg_amplitude(self.amplitude.value())
+        device.set_awg_offset(self.offset.value())
+        device.set_awg_square_duty(self.square_duty.value())
+        device.set_awg_ramp_duty(self.ramp_duty.value())
+        self._send_trap_duty(device)
+        device.awg_start(False)  # never energise on connect
+        _set_checked(self.start_button, False)
 
     def _send_trap_duty(self, device: Dmso2d72):
         device.set_awg_trap_duty(
@@ -150,7 +204,7 @@ class AwgTab(DeviceTab):
 
     def _toggle_output(self, on: bool):
         self.start_button.setText("Stop output" if on else "Start output")
-        self._apply(lambda d: d.awg_start(on))
+        self._queue(lambda d: d.awg_start(on))
 
     def _update_duty_visibility(self, wave_type: str):
         prefixes = DUTY_FIELDS.get(wave_type, ())

@@ -290,3 +290,20 @@ def test_dmm_mode_indices_are_unique():
 def test_dmm_mode_command_rejects_unknown_mode():
     with pytest.raises(ValueError):
         p.dmm_mode_command("Ohms")
+
+
+# --- active-measurement decode (func=0x0103/00 reply; re/DMM_PROTOCOL.md) ----
+
+
+def test_decode_measurement_scope():
+    assert p.decode_measurement(bytes.fromhex("550b030000")) == "scope"
+
+
+def test_decode_measurement_dmm_or_awg():
+    # byte 4 = 1 on the DMM and AWG screens (indistinguishable over USB).
+    assert p.decode_measurement(bytes.fromhex("550b030001")) == "dmm"
+
+
+def test_decode_measurement_rejects_garbage():
+    assert p.decode_measurement(b"") is None
+    assert p.decode_measurement(bytes.fromhex("00112233")) is None

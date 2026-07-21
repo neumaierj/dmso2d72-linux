@@ -40,6 +40,25 @@ FUNC_DMM_STATUS = 0x0101
 # Selects the multimeter measurement mode. The firmware handler switches on the
 # cmd byte alone and never reads the value bytes.
 FUNC_DMM_SETTING = 0x0001
+# Config reply. Reverse-engineered by hardware probing (re/DMM_PROTOCOL.md): the
+# sub-command 0x00 reply is `55 0b 03 00 <flag> ...` where <flag> is 0 on the
+# scope screen and 1 on the DMM/AWG screens. It is the only readable indicator
+# of the active screen -- and only distinguishes scope from not-scope, since the
+# DMM chip and AWG both run independently of the display.
+FUNC_CONFIG = 0x0103
+
+
+def decode_measurement(frame: bytes) -> str | None:
+    """Which measurement screen the device shows, from a FUNC_CONFIG/0x00 reply.
+
+    Returns "scope" or "dmm", or None if the frame is not recognisable. "dmm"
+    also covers the AWG screen: the two are indistinguishable over USB, and AWG
+    is a parallel output rather than a competing measurement, so it is treated
+    as the DMM measurement view.
+    """
+    if len(frame) < 5 or frame[0] != 0x55 or frame[2] != 0x03:
+        return None
+    return "scope" if frame[4] == 0x00 else "dmm"
 
 # Scope setting commands
 SCOPE_ENABLE_CH1 = 0x00

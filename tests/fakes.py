@@ -12,9 +12,11 @@ class FakeDevice:
     having to track the real class's surface.
     """
 
-    def __init__(self, fail_after: int | None = None, product: str = "FakeScope"):
+    def __init__(self, fail_after: int | None = None, product: str = "FakeScope",
+                 measurement: str = "dmm"):
         self.calls: list[tuple[str, tuple]] = []
         self.product = product
+        self.measurement = measurement
         self._fail_after = fail_after
         self.closed = False
 
@@ -24,6 +26,10 @@ class FakeDevice:
     def read_dmm(self):
         self.calls.append(("read_dmm", ()))
         return None
+
+    def active_measurement(self):
+        self.calls.append(("active_measurement", ()))
+        return self.measurement
 
     def __getattr__(self, name: str):
         if name.startswith("_"):
