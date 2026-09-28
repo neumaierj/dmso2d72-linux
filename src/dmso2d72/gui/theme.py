@@ -28,6 +28,8 @@ class Theme:
     axis: str
     grid_alpha: float
     dmm_history: str
+    accent: str
+    screen_bg: str  # the LCD-style readout panel
     channel_colors: dict[int, str] = field(default_factory=dict)
 
 
@@ -38,6 +40,8 @@ THEMES = {
         axis="#b0b8c0",
         grid_alpha=0.3,
         dmm_history="#5dade2",
+        accent="#3d9be9",
+        screen_bg="#0c141c",
         channel_colors={1: "#f4d03f", 2: "#5dade2"},
     ),
     "light": Theme(
@@ -46,10 +50,67 @@ THEMES = {
         axis="#404040",
         grid_alpha=0.25,
         dmm_history="#1f6fb2",
+        accent="#1f6fb2",
+        # The readout stays a dark LCD panel in both themes, for the instrument look.
+        screen_bg="#0d1b2a",
         # Darkened: the dark theme's #f4d03f/#5dade2 wash out on white.
         channel_colors={1: "#b8860b", 2: "#1f6fb2"},
     ),
 }
+
+
+def stylesheet(theme: Theme) -> str:
+    """A cohesive modern stylesheet. Surface colours come from the palette so it
+    adapts to light/dark; only the accent and the LCD panel are per-theme."""
+    a = theme.accent
+    return f"""
+    QGroupBox {{
+        border: 1px solid palette(mid);
+        border-radius: 8px;
+        margin-top: 12px;
+        padding: 10px 8px 8px 8px;
+        font-weight: 600;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 12px;
+        padding: 0 4px;
+        color: {a};
+    }}
+    QPushButton {{
+        border: 1px solid palette(mid);
+        border-radius: 6px;
+        padding: 6px 12px;
+        background: palette(button);
+    }}
+    QPushButton:hover:!disabled {{ border-color: {a}; }}
+    QPushButton:pressed {{ background: palette(midlight); }}
+    QPushButton:checked {{ background: {a}; color: #ffffff; border-color: {a}; font-weight: 600; }}
+    QComboBox, QDoubleSpinBox, QSpinBox {{
+        border: 1px solid palette(mid);
+        border-radius: 5px;
+        padding: 3px 6px;
+        min-height: 20px;
+    }}
+    QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {{ border-color: {a}; }}
+    QTabWidget::pane {{ border: 1px solid palette(mid); border-radius: 6px; top: -1px; }}
+    QTabBar::tab {{
+        padding: 8px 18px;
+        border: none;
+        background: transparent;
+        color: palette(text);
+    }}
+    QTabBar::tab:selected {{ color: {a}; border-bottom: 2px solid {a}; }}
+    QTabBar::tab:hover:!selected {{ color: {a}; }}
+    #dmmScreen {{
+        background: {theme.screen_bg};
+        border: 1px solid {a};
+        border-radius: 14px;
+    }}
+    #dmmScreen QLabel {{ color: #cfe3f2; background: transparent; }}
+    #dmmValue {{ color: {a}; }}
+    #dmmMode {{ color: #8fb3cc; }}
+    """
 
 _SCHEMES = {
     "dark": Qt.ColorScheme.Dark,

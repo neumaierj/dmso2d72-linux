@@ -13,3 +13,6 @@ re/*.dfu
 
 # Device photos (kept locally; may show personal surroundings)
 pictures/
+
+# Local incident snapshot (contains the copyrighted firmware dump)
+contextSnapshot/
